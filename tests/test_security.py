@@ -210,6 +210,45 @@ class TestCommandValidation:
         with pytest.raises(ValidationError, match="Dangerous"):
             validate_server_command("python", ["`whoami`"])
 
+    # ── Windows path edge cases ──
+    # These must all PASS (not raise) because create_subprocess_exec
+    # handles them safely without shell interpretation.
+
+    def test_spaces_in_path(self):
+        validate_server_command("npx", ["-y", "@mcp/server-fs", "C:\\Users\\John Doe\\project"])
+
+    def test_parentheses_in_path(self):
+        validate_server_command("npx", ["-y", "@mcp/server-fs", "C:\\Program Files (x86)\\app"])
+
+    def test_spaces_and_parentheses_combined(self):
+        validate_server_command("npx", ["-y", "@mcp/server-fs", "C:\\Users\\John Doe\\My Project (v2)"])
+
+    def test_windows_exe_with_spaces(self):
+        validate_server_command("C:\\Program Files\\Python314\\python.exe", ["-m", "server"])
+
+    def test_npx_cmd_with_spaces(self):
+        validate_server_command("C:\\Program Files\\nodejs\\npx.cmd", ["-y", "@mcp/server"])
+
+    def test_unicode_in_path(self):
+        validate_server_command("python", ["-m", "server", "C:\\Users\\Ren\u00e9\\docs"])
+
+    def test_long_windows_path(self):
+        validate_server_command("python", ["-m", "server", "C:\\Users\\User\\Desktop\\My Projects\\MCP (The Spine)\\data\\subfolder"])
+
+    # These must still be BLOCKED
+
+    def test_dollar_in_args(self):
+        with pytest.raises(ValidationError, match="Dangerous"):
+            validate_server_command("python", ["--flag=$(whoami)"])
+
+    def test_semicolon_in_args(self):
+        with pytest.raises(ValidationError, match="Dangerous"):
+            validate_server_command("python", ["server; rm -rf /"])
+
+    def test_ampersand_in_args(self):
+        with pytest.raises(ValidationError, match="Dangerous"):
+            validate_server_command("python", ["server & echo pwned"])
+
 
 # ───────────────────────────────────────────────
 # Rate Limiting
