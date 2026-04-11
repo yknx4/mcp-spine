@@ -11,7 +11,7 @@ import re
 
 _SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("AWS Key", re.compile(r"AKIA[0-9A-Z]{16}")),
-    ("GitHub Token", re.compile(r"gh[pousr]_[A-Za-z0-9_]{36,}")),
+    ("GitHub Token", re.compile(r"(gh[pousr]_[A-Za-z0-9_]{36,}|github_pat_[A-Za-z0-9_]{20,})")),
     ("Generic API Key", re.compile(r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*\S+")),
     ("Bearer Token", re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*")),
     ("Private Key Block", re.compile(r"-----BEGIN\s+(RSA |EC |DSA )?PRIVATE KEY-----")),
