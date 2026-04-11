@@ -112,6 +112,10 @@ class SpineProxy:
                 snippet_length=config.state_guard.snippet_length,
             )
 
+        # Human-in-the-loop: pending confirmations
+        self._pending_confirmations: dict[str, dict] = {}
+        self._confirmation_counter = 0
+
     async def start(self) -> None:
         """Start the proxy: enter message loop immediately, init servers in background."""
         self.logger.info(
@@ -418,6 +422,15 @@ class SpineProxy:
         if "spine_set_context" not in tool_names:
             allowed_tools.append(self._get_spine_meta_tool())
 
+        # Inject confirmation meta-tools if any tool policies use require_confirmation
+        has_confirmation_tools = any(
+            tp.require_confirmation for tp in self.config.security.tool_policies
+        )
+        if has_confirmation_tools:
+            for meta_tool in self._get_confirmation_meta_tools():
+                if meta_tool["name"] not in tool_names:
+                    allowed_tools.append(meta_tool)
+
         # Strip internal metadata before sending to client
         clean_tools = [self._clean_tool(t) for t in allowed_tools]
 
@@ -496,6 +509,19 @@ class SpineProxy:
         # ── Handle spine_set_context meta-tool ──
         if tool_name == "spine_set_context":
             return await self._handle_set_context(msg_id, arguments)
+
+        # ── Handle spine_confirm meta-tool ──
+        if tool_name == "spine_confirm":
+            return await self._handle_confirm(msg_id, arguments)
+
+        # ── Handle spine_deny meta-tool ──
+        if tool_name == "spine_deny":
+            return await self._handle_deny(msg_id, arguments)
+
+        # ── Security Check 5: Human-in-the-loop ──
+        policy = self.config.security.get_tool_policy(tool_name)
+        if policy and policy.require_confirmation:
+            return self._request_confirmation(msg_id, tool_name, arguments, message)
 
         # ── Route to downstream server ──
         server = self.pool.route_tool(tool_name)
@@ -680,3 +706,167 @@ class SpineProxy:
                 "required": ["task"],
             },
         }
+
+    def _get_confirmation_meta_tools(self) -> list[dict[str, Any]]:
+        """Return the spine_confirm and spine_deny meta-tool definitions."""
+        return [
+            {
+                "name": "spine_confirm",
+                "description": (
+                    "Confirm a pending tool call that requires human approval. "
+                    "The user must approve before the tool executes. "
+                    "Call this with the confirmation_id after the user says yes."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "confirmation_id": {
+                            "type": "string",
+                            "description": "The confirmation ID from the pending request",
+                        }
+                    },
+                    "required": ["confirmation_id"],
+                },
+            },
+            {
+                "name": "spine_deny",
+                "description": (
+                    "Deny a pending tool call that requires human approval. "
+                    "Call this if the user says no or wants to cancel."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "confirmation_id": {
+                            "type": "string",
+                            "description": "The confirmation ID to deny",
+                        }
+                    },
+                    "required": ["confirmation_id"],
+                },
+            },
+        ]
+
+    def _request_confirmation(
+        self, msg_id: int | str, tool_name: str,
+        arguments: dict[str, Any], original_message: dict
+    ) -> dict:
+        """
+        Intercept a tool call that requires confirmation.
+
+        Stores the pending call and returns a message asking
+        the LLM to get user approval before proceeding.
+        """
+        self._confirmation_counter += 1
+        conf_id = f"confirm_{self._confirmation_counter}"
+
+        self._pending_confirmations[conf_id] = {
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "original_message": original_message,
+            "msg_id": msg_id,
+        }
+
+        self.logger.security(
+            EventType.POLICY_DENY,
+            tool_name=tool_name,
+            reason=f"Requires confirmation (id={conf_id})",
+        )
+
+        # Format arguments for display
+        args_display = json.dumps(arguments, indent=2)
+
+        return make_response(msg_id, {
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        f"⚠️ CONFIRMATION REQUIRED\n\n"
+                        f"Tool: {tool_name}\n"
+                        f"Arguments:\n{args_display}\n\n"
+                        f"This tool requires human approval before executing.\n"
+                        f"Please ask the user to confirm, then call spine_confirm "
+                        f"with confirmation_id=\"{conf_id}\" to proceed, "
+                        f"or spine_deny to cancel."
+                    ),
+                }
+            ],
+        })
+
+    async def _handle_confirm(
+        self, msg_id: int | str, arguments: dict[str, Any]
+    ) -> dict:
+        """Execute a previously pending tool call after confirmation."""
+        conf_id = arguments.get("confirmation_id", "")
+
+        if conf_id not in self._pending_confirmations:
+            return make_error(
+                msg_id, INVALID_PARAMS,
+                f"No pending confirmation with id '{conf_id}'. "
+                f"It may have expired or already been processed."
+            )
+
+        pending = self._pending_confirmations.pop(conf_id)
+
+        self.logger.info(
+            EventType.TOOL_CALL,
+            tool_name=pending["tool_name"],
+            confirmation_id=conf_id,
+            action="confirmed",
+        )
+
+        # Route to the downstream server
+        server = self.pool.route_tool(pending["tool_name"])
+        if server is None:
+            return make_error(
+                msg_id, TOOL_NOT_FOUND,
+                f"No server available for tool '{pending['tool_name']}'"
+            )
+
+        # Execute the original call
+        with self.logger.timed(
+            EventType.TOOL_CALL,
+            tool_name=pending["tool_name"],
+            confirmed=True,
+        ):
+            result = await server.send_request(
+                "tools/call", pending["original_message"].get("params")
+            )
+
+        response_result = result.get("result", result)
+
+        # Apply state guard pin if needed
+        if self._state_guard:
+            response_result = self._state_guard.inject_pin(response_result)
+
+        return make_response(msg_id, response_result)
+
+    async def _handle_deny(
+        self, msg_id: int | str, arguments: dict[str, Any]
+    ) -> dict:
+        """Cancel a previously pending tool call."""
+        conf_id = arguments.get("confirmation_id", "")
+
+        if conf_id not in self._pending_confirmations:
+            return make_error(
+                msg_id, INVALID_PARAMS,
+                f"No pending confirmation with id '{conf_id}'."
+            )
+
+        pending = self._pending_confirmations.pop(conf_id)
+
+        self.logger.info(
+            EventType.TOOL_CALL,
+            tool_name=pending["tool_name"],
+            confirmation_id=conf_id,
+            action="denied",
+        )
+
+        return make_response(msg_id, {
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"Tool call '{pending['tool_name']}' was denied by the user.",
+                }
+            ],
+        })
