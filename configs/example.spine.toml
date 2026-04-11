@@ -1,56 +1,75 @@
 # ============================================================
 # MCP Spine — Example Configuration
 # ============================================================
-# A real-world config for a full-stack TypeScript/Python project
-# with GitHub, filesystem, and database MCP servers.
+# A real-world config for a full-stack project with multiple
+# MCP servers proxied through a single security layer.
+#
+# Copy this file, rename to spine.toml, and customize.
+# All paths use forward slashes — works on Windows and Linux.
 
 [spine]
-log_level = "info"
-audit_db = ".spine/audit.db"
+log_level = "info"                  # debug | info | warn | error
+audit_db = "spine_audit.db"         # SQLite audit trail (use absolute path on Windows)
 
-# ── Downstream MCP Servers ──
+# ── Downstream MCP Servers ──────────────────────────────────
+# All servers start concurrently. The Spine responds to Claude
+# as soon as ANY server is ready — slow servers appear later
+# via a tools/listChanged notification.
 
 [[servers]]
 name = "filesystem"
 command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/my-project"]
-timeout_seconds = 15
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/project"]
+timeout_seconds = 120
 
 [[servers]]
 name = "github"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
-env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }
-timeout_seconds = 30
-max_retries = 3
+env = { GITHUB_TOKEN = "ghp_your_token_here" }
+timeout_seconds = 180               # npx first-run is slow; cached after that
 
 [[servers]]
-name = "postgres"
-command = "python3"
-args = ["-m", "mcp_server_postgres", "--connection-string", "${DATABASE_URL}"]
-timeout_seconds = 20
-circuit_breaker_threshold = 5
+name = "sqlite"
+command = "uvx"                     # or use a Python wrapper script
+args = ["mcp-server-sqlite", "--db-path", "/path/to/database.db"]
+timeout_seconds = 60
 
-# ── Semantic Routing ──
+[[servers]]
+name = "memory"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-memory"]
+timeout_seconds = 60
+
+# ── Semantic Routing (Stage 2) ──────────────────────────────
+# Routes only the most relevant tools to the LLM per request.
+# Requires: pip install mcp-spine[ml]
+# Loads in background — tools work immediately, routing
+# activates when the model finishes loading.
 
 [routing]
-max_tools = 5
-always_include = ["read_file", "write_file", "spine_set_context"]
+max_tools = 15                      # 0 = show all tools (no routing)
+always_include = ["spine_set_context", "read_file", "write_file"]
 embedding_model = "all-MiniLM-L6-v2"
-rerank = true
+rerank = true                       # keyword overlap + recency boost
 similarity_threshold = 0.25
 
-# ── Schema Minification ──
+# ── Schema Minification (Stage 3) ───────────────────────────
+# Strips unnecessary fields from tool schemas to save tokens.
+# Level 0 = off, 1 = light, 2 = standard (61% savings), 3 = aggressive
 
 [minifier]
 level = 2
-max_description_length = 100
+max_description_length = 100        # truncate long descriptions
+preserve_required = true
 
-# ── State Guard ──
+# ── State Guard (Stage 4) ───────────────────────────────────
+# Watches project files and injects SHA-256 version pins into
+# tool responses. Prevents LLMs from editing stale file versions.
 
 [state_guard]
 enabled = true
-watch_paths = ["/home/user/my-project/src", "/home/user/my-project/tests"]
+watch_paths = ["/path/to/project/src", "/path/to/project/tests"]
 max_tracked_files = 100
 max_pin_files = 15
 snippet_length = 150
@@ -58,25 +77,28 @@ ignore_patterns = [
     "**/.git/**",
     "**/node_modules/**",
     "**/__pycache__/**",
+    "**/.venv/**",
     "**/dist/**",
     "**/build/**",
     "**/*.pyc",
     "**/.DS_Store",
+    "**/spine_audit.db",
+    "**/.spine/**",
     "**/package-lock.json",
     "**/yarn.lock",
 ]
 
-# ── Security ──
+# ── Security ────────────────────────────────────────────────
 
 [security]
-scrub_secrets_in_logs = true
-scrub_secrets_in_responses = false
-audit_all_tool_calls = true
-global_rate_limit = 120
-per_tool_rate_limit = 30
+scrub_secrets_in_logs = true        # scrub AWS keys, tokens, etc. from logs
+scrub_secrets_in_responses = false  # opt-in: may break tool output
+audit_all_tool_calls = true         # full audit trail in SQLite
+global_rate_limit = 120             # calls/minute across all tools
+per_tool_rate_limit = 60            # calls/minute per individual tool
 
 [security.path]
-allowed_roots = ["/home/user/my-project"]
+allowed_roots = ["/path/to/project"]
 denied_patterns = [
     "**/.env",
     "**/.env.*",
@@ -90,19 +112,55 @@ denied_patterns = [
     "**/credentials.json",
 ]
 
-# Block dangerous tools
-[[security.tools]]
-pattern = "execute_command"
-action = "deny"
+# ── Tool Policies ──────────────────────────────────────────
+# Per-tool security rules using glob patterns.
+# Actions: "allow" (default), "deny" (block), "audit" (allow + warn)
 
-# Audit file writes
+# Require human confirmation for destructive file operations
 [[security.tools]]
 pattern = "write_file"
-action = "audit"
-rate_limit = 20
+action = "allow"
+require_confirmation = true
 
-# Audit database mutations
 [[security.tools]]
-pattern = "query"
+pattern = "edit_file"
+action = "allow"
+require_confirmation = true
+
+[[security.tools]]
+pattern = "create_directory"
+action = "allow"
+require_confirmation = true
+
+[[security.tools]]
+pattern = "move_file"
+action = "allow"
+require_confirmation = true
+
+# Require confirmation for destructive GitHub operations
+[[security.tools]]
+pattern = "push_files"
+action = "allow"
+require_confirmation = true
+
+[[security.tools]]
+pattern = "merge_pull_request"
+action = "allow"
+require_confirmation = true
+
+# Require confirmation for database writes
+[[security.tools]]
+pattern = "write_query"
+action = "allow"
+require_confirmation = true
+
+# Audit all database reads
+[[security.tools]]
+pattern = "read_query"
 action = "audit"
-rate_limit = 15
+rate_limit = 30
+
+# Block any tool matching "execute_command"
+[[security.tools]]
+pattern = "execute_*"
+action = "deny"
