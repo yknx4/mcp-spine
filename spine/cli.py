@@ -517,5 +517,126 @@ def analytics(db: str, hours: int, json_output: bool) -> None:
     console.print()
 
 
+@main.command()
+@click.option("--config", "-c", default="spine.toml", help="Config file path")
+def doctor(config: str) -> None:
+    """Diagnose common setup issues."""
+    import os
+    import platform
+    import shutil
+
+    console.print(Panel("[bold cyan]MCP Spine Doctor[/bold cyan]", style="cyan"))
+
+    # System info
+    t = Table(title="System", show_header=False, expand=True)
+    t.add_column(ratio=1)
+    t.add_column(ratio=2)
+    t.add_row("OS", f"{platform.system()} {platform.release()}")
+    t.add_row("Python", f"{platform.python_version()} ({sys.executable})")
+    t.add_row("Architecture", platform.machine())
+    t.add_row("CWD", os.getcwd())
+    console.print(t)
+
+    # Config
+    config_path = Path(config)
+    t2 = Table(title="Config", show_header=False, expand=True)
+    t2.add_column(ratio=1)
+    t2.add_column(ratio=2)
+    t2.add_row("Config file", str(config_path.absolute()))
+    t2.add_row("Exists", "[green]Yes[/green]" if config_path.exists() else "[red]No[/red]")
+
+    if config_path.exists():
+        try:
+            from spine.config import load_config
+            cfg = load_config(str(config_path))
+            t2.add_row("Servers", str(len(cfg.servers)))
+            for s in cfg.servers:
+                transport = f"[cyan]{s.transport}[/cyan]"
+                if s.transport == "sse":
+                    t2.add_row(f"  {s.name}", f"{transport} → {s.url}")
+                else:
+                    t2.add_row(f"  {s.name}", f"{transport} → {s.command} {' '.join(s.args[:2])}")
+            t2.add_row("Minification", f"Level {cfg.minifier.level}")
+            t2.add_row("State Guard", "[green]on[/green]" if cfg.state_guard.enabled else "[dim]off[/dim]")
+            t2.add_row("Audit DB", cfg.audit_db)
+        except Exception as e:
+            t2.add_row("[red]Error[/red]", str(e))
+    console.print(t2)
+
+    # Commands
+    t3 = Table(title="Dependencies", show_header=False, expand=True)
+    t3.add_column(ratio=1)
+    t3.add_column(ratio=2)
+
+    for cmd in ["npx", "node", "npm", "uvx", "git"]:
+        path = shutil.which(cmd)
+        if path:
+            t3.add_row(cmd, f"[green]{path}[/green]")
+        else:
+            t3.add_row(cmd, "[red]Not found[/red]")
+
+    # ML deps
+    try:
+        import sentence_transformers
+        t3.add_row("sentence-transformers", f"[green]{sentence_transformers.__version__}[/green]")
+    except ImportError:
+        t3.add_row("sentence-transformers", "[dim]Not installed (optional)[/dim]")
+
+    try:
+        import chromadb
+        t3.add_row("chromadb", f"[green]{chromadb.__version__}[/green]")
+    except ImportError:
+        t3.add_row("chromadb", "[dim]Not installed (optional)[/dim]")
+
+    console.print(t3)
+
+    # Claude Desktop config
+    t4 = Table(title="Claude Desktop", show_header=False, expand=True)
+    t4.add_column(ratio=1)
+    t4.add_column(ratio=2)
+
+    claude_paths = [
+        Path(os.environ.get("APPDATA", "")) / "Claude" / "claude_desktop_config.json",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Packages" / "Claude_pzs8sxrjxfjjc" / "LocalCache" / "Roaming" / "Claude" / "claude_desktop_config.json",
+    ]
+
+    found = False
+    for cp in claude_paths:
+        if cp.exists():
+            t4.add_row("Config", f"[green]{cp}[/green]")
+            found = True
+            try:
+                import json as _json
+                data = _json.loads(cp.read_text())
+                servers = data.get("mcpServers", {})
+                spine_entry = servers.get("spine")
+                if spine_entry:
+                    t4.add_row("Spine entry", "[green]Found[/green]")
+                    t4.add_row("  Command", spine_entry.get("command", "?"))
+                else:
+                    t4.add_row("Spine entry", "[red]Not found — add it to mcpServers[/red]")
+            except Exception:
+                t4.add_row("Parse", "[red]Failed to read config[/red]")
+            break
+
+    if not found:
+        t4.add_row("Config", "[red]Not found[/red]")
+
+    # Log file
+    log_paths = [
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Packages" / "Claude_pzs8sxrjxfjjc" / "LocalCache" / "Roaming" / "Claude" / "logs" / "mcp-server-spine.log",
+        Path(os.environ.get("APPDATA", "")) / "Claude" / "logs" / "mcp-server-spine.log",
+    ]
+    for lp in log_paths:
+        if lp.exists():
+            t4.add_row("Log file", f"[green]{lp}[/green]")
+            break
+    else:
+        t4.add_row("Log file", "[dim]Not found (starts after first run)[/dim]")
+
+    console.print(t4)
+    console.print()
+
+
 if __name__ == "__main__":
     main()

@@ -14,6 +14,49 @@ LLM agents using MCP tools face three problems:
 
 MCP Spine solves all three.
 
+## Install
+
+```bash
+pip install mcp-spine
+
+# With semantic routing (optional)
+pip install mcp-spine[ml]
+```
+
+## Quick Start
+
+```bash
+# Generate config
+mcp-spine init
+
+# Diagnose your setup
+mcp-spine doctor --config spine.toml
+
+# Validate config
+mcp-spine verify --config spine.toml
+
+# Start the proxy
+mcp-spine serve --config spine.toml
+```
+
+## Claude Desktop Integration
+
+Replace all your individual MCP server entries with a single Spine entry:
+
+```json
+{
+  "mcpServers": {
+    "spine": {
+      "command": "python",
+      "args": ["-u", "-m", "spine.cli", "serve", "--config", "/path/to/spine.toml"],
+      "cwd": "/path/to/mcp-spine"
+    }
+  }
+}
+```
+
+The `-u` flag ensures unbuffered stdout, preventing pipe hangs on Windows.
+
 ## Features
 
 ### Stage 1: Security Proxy
@@ -52,49 +95,44 @@ MCP Spine solves all three.
 - `spine_confirm` / `spine_deny` meta-tools for the LLM to relay the decision
 - Per-tool granularity via glob patterns
 
-## Quick Start
+### Tool Output Memory
+- Ring buffer caching last 50 tool results
+- Deduplication by tool name + argument hash
+- TTL expiration (1 hour default)
+- `spine_recall` meta-tool to query cached results
+- Prevents context loss when semantic router swaps tools between turns
+
+### SSE Transport
+- Connect to remote MCP servers over HTTP/SSE alongside local stdio servers
+- No external dependencies (uses stdlib urllib)
+- Supports custom headers for authentication
+
+### Diagnostics
 
 ```bash
-# Install core
-pip install -e .
+# Check your setup
+mcp-spine doctor --config spine.toml
 
-# Install with semantic routing (optional)
-pip install -e ".[ml]"
+# Live monitoring dashboard
+mcp-spine dashboard
 
-# Generate config
-mcp-spine init
+# Usage analytics
+mcp-spine analytics --hours 24
 
-# Edit spine.toml to add your MCP servers, then:
-mcp-spine verify    # validate config
-mcp-spine serve     # start the proxy
+# Query audit log
+mcp-spine audit --last 50
+mcp-spine audit --security-only
+mcp-spine audit --tool write_file
 ```
 
-## Claude Desktop Integration
-
-Replace all your individual MCP server entries with a single Spine entry:
-
-```json
-{
-  "mcpServers": {
-    "spine": {
-      "command": "python",
-      "args": ["-u", "-m", "spine.cli", "serve", "--config", "/path/to/spine.toml"],
-      "cwd": "/path/to/mcp-spine"
-    }
-  }
-}
-```
-
-The `-u` flag ensures unbuffered stdout, preventing pipe hangs on Windows.
-
-### Example Config
+## Example Config
 
 ```toml
 [spine]
 log_level = "info"
 audit_db = "spine_audit.db"
 
-# Add as many servers as you need
+# Add as many servers as you need — they start concurrently
 [[servers]]
 name = "filesystem"
 command = "npx"
@@ -106,11 +144,38 @@ name = "github"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
 env = { GITHUB_TOKEN = "ghp_..." }
+timeout_seconds = 180
+
+[[servers]]
+name = "sqlite"
+command = "uvx"
+args = ["mcp-server-sqlite", "--db-path", "/path/to/database.db"]
 timeout_seconds = 60
 
-# Semantic routing — filter to top-K tools per request
+[[servers]]
+name = "memory"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-memory"]
+timeout_seconds = 60
+
+[[servers]]
+name = "brave-search"
+command = "node"
+args = ["/path/to/node_modules/@modelcontextprotocol/server-brave-search/dist/index.js"]
+env = { BRAVE_API_KEY = "your_key" }
+timeout_seconds = 60
+
+# Remote server via SSE
+# [[servers]]
+# name = "remote-tools"
+# transport = "sse"
+# url = "https://your-server.com/sse"
+# headers = { Authorization = "Bearer token" }
+# timeout_seconds = 30
+
+# Semantic routing
 [routing]
-max_tools = 20
+max_tools = 15
 rerank = true
 
 # Schema minification — 61% token savings at level 2
@@ -122,14 +187,14 @@ level = 2
 enabled = true
 watch_paths = ["/path/to/project"]
 
-# Human-in-the-loop — require approval for destructive tools
+# Human-in-the-loop for destructive tools
 [[security.tools]]
 pattern = "write_file"
 action = "allow"
 require_confirmation = true
 
 [[security.tools]]
-pattern = "delete_file"
+pattern = "write_query"
 action = "allow"
 require_confirmation = true
 
@@ -147,66 +212,58 @@ denied_patterns = ["**/.env", "**/*.key", "**/*.pem"]
 
 ## Security Model
 
-The Spine is designed with defense-in-depth. Every layer assumes the others might fail.
+Defense-in-depth — every layer assumes the others might fail.
 
 | Threat | Mitigation |
 |---|---|
-| **Prompt injection via tool args** | Input validation on all JSON-RPC messages; tool name and method allowlists |
-| **Path traversal** | All file paths resolved and jailed to `allowed_roots`; symlink-aware |
-| **Secret leakage in logs** | Automatic regex-based scrubbing of AWS keys, GitHub tokens, bearer tokens, private keys, connection strings |
-| **Runaway agent loops** | Per-tool and global rate limiting with sliding windows |
-| **Command injection via server spawn** | Command allowlist; shell metacharacter blocking; `PureWindowsPath` basename extraction for paths with spaces/parens |
-| **Denial of service** | Message size limits (10MB); schema depth limits; circuit breakers on failing servers |
-| **Sensitive file access** | Deny-list patterns for `.env`, `.key`, `.pem`, `.ssh/`, `.aws/` files |
-| **Tool abuse** | Policy-based tool blocking, audit logging, and human-in-the-loop confirmation |
-| **Log tampering** | HMAC fingerprints on every audit entry |
-| **Env var exposure** | Fail-closed resolution: undefined `${VAR}` raises an error |
-| **Destructive operations** | `require_confirmation` flag pauses execution until user approves |
-
-### Audit Trail
-
-Every tool call is logged to SQLite with tamper-evident fingerprints:
-
-```bash
-mcp-spine audit --last 50          # Recent entries
-mcp-spine audit --security-only    # Security events only
-mcp-spine audit --tool write_file  # Filter by tool
-```
+| Prompt injection via tool args | Input validation, tool name allowlists |
+| Path traversal | Symlink-aware jail to `allowed_roots` |
+| Secret leakage | Automatic scrubbing of AWS keys, tokens, private keys |
+| Runaway agent loops | Per-tool + global rate limiting |
+| Command injection | Command allowlist, shell metacharacter blocking |
+| Denial of service | Message size limits, circuit breakers |
+| Sensitive file access | Deny-list patterns for `.env`, `.key`, `.pem`, `.ssh/` |
+| Tool abuse | Policy-based blocking, audit logging, HITL confirmation |
+| Log tampering | HMAC fingerprints on every audit entry |
+| Destructive operations | `require_confirmation` pauses for user approval |
 
 ## Architecture
 
 ```
 Client ◄──stdio──► MCP Spine ◄──stdio──► Filesystem Server
-                       │                  GitHub Server
-                       │                  Any MCP Server
+                       │      ◄──stdio──► GitHub Server
+                       │      ◄──stdio──► SQLite Server
+                       │      ◄──stdio──► Memory Server
+                       │      ◄──stdio──► Brave Search
+                       │      ◄──SSE────► Remote Server
                    ┌───┴───┐
                    │SecPol │  ← Rate limits, path jail, secret scrub
                    │Router │  ← Semantic routing (local embeddings)
                    │Minify │  ← Schema compression (61% savings)
                    │Guard  │  ← File state pinning (SHA-256)
                    │HITL   │  ← Human-in-the-loop confirmation
+                   │Memory │  ← Tool output cache
                    └───────┘
 ```
 
 ### Startup Sequence
 
-The Spine uses a two-phase background initialization:
-
 1. **Instant handshake** (~2ms) — Responds to `initialize` immediately
-2. **Background init** — Connects servers concurrently, sets ready as soon as any server has tools
-3. **ML loading** — Semantic router model loads in a separate background task; routing activates silently when done
-
-This ensures Claude Desktop never times out, even with slow servers or large ML models.
+2. **Concurrent server startup** — All servers connect in parallel via `asyncio.gather`
+3. **Progressive readiness** — Tools available as soon as any server connects
+4. **Late server notification** — `tools/listChanged` sent when slow servers finish
+5. **Background ML loading** — Semantic router activates silently when model loads
 
 ## Windows Support
 
-MCP Spine is battle-tested on Windows with specific hardening for:
+Battle-tested on Windows with specific hardening for:
 
 - MSIX sandbox paths for Claude Desktop config and logs
 - `npx.cmd` resolution via `shutil.which()`
-- Paths with spaces (`C:\Users\John Doe\...`) and parentheses (`C:\Program Files (x86)\...`)
+- Paths with spaces (`C:\Users\John Doe\`) and parentheses (`C:\Program Files (x86)\`)
 - `PureWindowsPath` for cross-platform basename extraction
-- UTF-8 encoding without BOM for config file generation
+- Environment variable merging (config env extends, not replaces, system env)
+- UTF-8 encoding without BOM
 - Unbuffered stdout (`-u` flag) to prevent pipe hangs
 
 ## Project Structure
@@ -215,7 +272,7 @@ MCP Spine is battle-tested on Windows with specific hardening for:
 mcp-spine/
 ├── pyproject.toml
 ├── spine/
-│   ├── cli.py              # Click CLI (init, serve, verify, audit)
+│   ├── cli.py              # Click CLI (init, serve, verify, audit, dashboard, analytics, doctor)
 │   ├── config.py           # TOML config loader with validation
 │   ├── proxy.py            # Core proxy event loop
 │   ├── protocol.py         # JSON-RPC message handling
@@ -224,6 +281,9 @@ mcp-spine/
 │   ├── router.py           # Semantic routing (ChromaDB + sentence-transformers)
 │   ├── minifier.py         # Schema pruning (4 aggression levels)
 │   ├── state_guard.py      # File watcher + SHA-256 manifest + pin injection
+│   ├── memory.py           # Tool output cache (ring buffer + dedup + TTL)
+│   ├── dashboard.py        # Live TUI dashboard (Rich)
+│   ├── sse_client.py       # SSE transport client for remote servers
 │   └── security/
 │       ├── secrets.py      # Credential detection & scrubbing
 │       ├── paths.py        # Path traversal jail
@@ -234,28 +294,28 @@ mcp-spine/
 │       ├── env.py          # Fail-closed env var resolution
 │       └── policy.py       # Declarative security policies
 ├── tests/
-│   ├── test_security.py    # 93 security tests
+│   ├── test_security.py    # Security tests
 │   ├── test_config.py      # Config validation tests
 │   ├── test_minifier.py    # Schema minification tests
-│   └── test_state_guard.py # State guard tests
-└── configs/
-    └── example.spine.toml
+│   ├── test_state_guard.py # State guard tests
+│   ├── test_proxy_features.py  # HITL, dashboard, analytics tests
+│   └── test_memory.py      # Tool output memory tests
+├── configs/
+│   └── example.spine.toml  # Complete reference config
+└── .github/
+    └── workflows/
+        └── ci.yml          # GitHub Actions: test + lint + publish
 ```
 
 ## Tests
 
 ```bash
-# Run all tests
-pytest
-
-# Security tests only
-pytest tests/test_security.py -v
-
-# End-to-end tests
-python test_e2e.py
+pytest tests/ -v
 ```
 
-98 tests covering security, config validation, schema minification, state guard, and Windows path edge cases.
+135+ tests covering security, config validation, schema minification, state guard, HITL policies, dashboard queries, analytics, tool memory, and Windows path edge cases.
+
+CI runs on every push: Windows + Linux, Python 3.11/3.12/3.13.
 
 ## License
 

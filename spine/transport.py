@@ -13,19 +13,15 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from spine.audit import AuditLogger, EventType, LogLevel
 from spine.config import ServerConfig
 from spine.protocol import (
-    INTERNAL_ERROR,
-    make_error,
     read_jsonrpc,
     write_jsonrpc,
 )
-from spine.security import scrub_secrets
-
 
 # ---------------------------------------------------------------------------
 # Circuit Breaker
