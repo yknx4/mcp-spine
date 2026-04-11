@@ -116,6 +116,14 @@ class SpineProxy:
         self._pending_confirmations: dict[str, dict] = {}
         self._confirmation_counter = 0
 
+        # Tool output memory
+        from spine.memory import ToolMemory
+        self._memory = ToolMemory(
+            max_entries=50,
+            max_summary_length=200,
+            ttl_seconds=3600.0,
+        )
+
     async def start(self) -> None:
         """Start the proxy: enter message loop immediately, init servers in background."""
         self.logger.info(
@@ -436,6 +444,10 @@ class SpineProxy:
         if "spine_set_context" not in tool_names:
             allowed_tools.append(self._get_spine_meta_tool())
 
+        # Inject spine_recall meta-tool
+        if "spine_recall" not in tool_names:
+            allowed_tools.append(self._get_recall_meta_tool())
+
         # Inject confirmation meta-tools if any tool policies use require_confirmation
         has_confirmation_tools = any(
             tp.require_confirmation for tp in self.config.security.tool_policies
@@ -532,6 +544,10 @@ class SpineProxy:
         if tool_name == "spine_deny":
             return await self._handle_deny(msg_id, arguments)
 
+        # ── Handle spine_recall meta-tool ──
+        if tool_name == "spine_recall":
+            return self._handle_recall(msg_id, arguments)
+
         # ── Security Check 5: Human-in-the-loop ──
         policy = self.config.security.get_tool_policy(tool_name)
         if policy and policy.require_confirmation:
@@ -564,6 +580,9 @@ class SpineProxy:
         # Stage 4: Inject state pin into response
         if self._state_guard:
             result = self._state_guard.inject_pin_into_response(result)
+
+        # Cache tool result in memory
+        self._memory.store(tool_name, arguments, result.get("result", result))
 
         # ── Audit Log ──
         self.logger.info(
@@ -884,3 +903,61 @@ class SpineProxy:
                 }
             ],
         })
+
+    def _handle_recall(
+        self, msg_id: int | str, arguments: dict[str, Any]
+    ) -> dict:
+        """Recall cached tool results from memory."""
+        tool_name = arguments.get("tool_name")
+        query = arguments.get("query")
+        last_n = arguments.get("last_n", 5)
+
+        if query:
+            results = self._memory.search(query, last_n=last_n)
+        else:
+            results = self._memory.recall(tool_name=tool_name, last_n=last_n)
+
+        if not results:
+            text = "No cached tool results found."
+            if tool_name:
+                text += f" (filtered by tool: {tool_name})"
+            if query:
+                text += f" (searched for: {query})"
+        else:
+            lines = [f"Cached results ({len(results)} found):"]
+            for r in results:
+                lines.append(r.to_compact())
+            text = "\n".join(lines)
+
+        return make_response(msg_id, {
+            "content": [{"type": "text", "text": text}],
+        })
+
+    def _get_recall_meta_tool(self) -> dict[str, Any]:
+        """Return the spine_recall meta-tool definition."""
+        return {
+            "name": "spine_recall",
+            "description": (
+                "Recall cached results from previous tool calls. "
+                "Use this to check what a tool returned earlier without "
+                "re-calling it, especially if that tool is no longer "
+                "in your active tool set."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tool_name": {
+                        "type": "string",
+                        "description": "Filter by tool name (optional)",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Search cached results by keyword (optional)",
+                    },
+                    "last_n": {
+                        "type": "integer",
+                        "description": "Number of recent results to return (default 5)",
+                    },
+                },
+            },
+        }
