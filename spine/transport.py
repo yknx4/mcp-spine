@@ -320,8 +320,8 @@ class ServerPool:
         self._tool_to_server: dict[str, str] = {}
 
     async def start_all(self) -> None:
-        """Start all configured servers and gather their tools."""
-        for name, server in self._servers.items():
+        """Start all configured servers concurrently."""
+        async def _start_one(name: str, server: ServerConnection) -> None:
             try:
                 await server.start()
                 await server.initialize()
@@ -334,6 +334,12 @@ class ServerPool:
                     server_name=name,
                     error=str(e),
                 )
+
+        # Start all servers concurrently — fast ones don't wait for slow ones
+        await asyncio.gather(
+            *[_start_one(name, server) for name, server in self._servers.items()],
+            return_exceptions=True,
+        )
 
     def all_tools(self) -> list[dict[str, Any]]:
         """Return all tools from all available servers."""

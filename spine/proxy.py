@@ -233,23 +233,40 @@ class SpineProxy:
         Heavy initialization that runs in the background.
 
         Two phases:
-          1. Connect servers → set _ready (fast, ~5s)
+          1. Connect servers → set _ready as soon as ANY has tools (~5s)
           2. Load ML model → enable routing (slow, ~30s)
 
         tools/list and tools/call wait for phase 1 only.
         Semantic routing activates silently when phase 2 completes.
         """
         try:
-            # Phase 1: Connect to downstream servers (fast)
-            await self.pool.start_all()
+            # Start connecting all servers concurrently
+            init_task = asyncio.create_task(self.pool.start_all())
 
-            # Mark ready NOW — tools work immediately
+            # Poll until at least one server has tools
+            for _ in range(300):  # 60 seconds max
+                await asyncio.sleep(0.2)
+                if self.pool.all_tools():
+                    break
+
+            # Mark ready as soon as any tools are available
             self._ready = True
+            tool_count = len(self.pool.all_tools())
             self.logger.info(
                 EventType.STARTUP,
-                message="Servers connected, tools available",
-                tools=len(self.pool.all_tools()),
+                message=f"Tools available ({tool_count} tools), accepting requests",
             )
+
+            # Wait for remaining servers to finish connecting
+            await init_task
+
+            # Log final tool count (may be higher now)
+            final_count = len(self.pool.all_tools())
+            if final_count > tool_count:
+                self.logger.info(
+                    EventType.STARTUP,
+                    message=f"All servers connected ({final_count} tools total)",
+                )
 
             # Phase 2: Load ML model in background (slow, non-blocking)
             if self._router:
@@ -263,7 +280,7 @@ class SpineProxy:
                 EventType.STARTUP,
                 error=f"Background init failed: {e}",
             )
-            self._ready = True  # Mark ready anyway so tools/list doesn't hang
+            self._ready = True
 
     async def _load_router(self) -> None:
         """Load the semantic router ML model in the background."""
