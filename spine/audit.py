@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -73,6 +74,7 @@ class AuditLogger:
 
     All string values in details are scrubbed for secrets before storage.
     Each entry gets an HMAC fingerprint for tamper detection.
+    Thread-safe: uses a lock for all database operations.
     """
 
     def __init__(
@@ -87,11 +89,12 @@ class AuditLogger:
         self._console = console or _console
         self._db_path = db_path
         self._db: sqlite3.Connection | None = None
+        self._db_lock = threading.Lock()
         self._init_db()
 
     def _init_db(self) -> None:
         """Initialize SQLite audit database."""
-        self._db = sqlite3.connect(self._db_path)
+        self._db = sqlite3.connect(self._db_path, check_same_thread=False)
         self._db.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -176,18 +179,19 @@ class AuditLogger:
 
         self._console.print(f"[{style}]SPINE {msg}[/{style}]")
 
-        # SQLite persistence
+        # SQLite persistence (thread-safe)
         if self._db:
-            try:
-                self._db.execute(
-                    """INSERT INTO audit_log
-                       (timestamp, event_type, tool_name, server_name, details, fingerprint)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (ts, event_type.value, tool_name, server_name, details_json, fp),
-                )
-                self._db.commit()
-            except sqlite3.Error as e:
-                self._console.print(f"[red]SPINE audit DB error: {e}[/red]")
+            with self._db_lock:
+                try:
+                    self._db.execute(
+                        """INSERT INTO audit_log
+                           (timestamp, event_type, tool_name, server_name, details, fingerprint)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (ts, event_type.value, tool_name, server_name, details_json, fp),
+                    )
+                    self._db.commit()
+                except sqlite3.Error as e:
+                    self._console.print(f"[red]SPINE audit DB error: {e}[/red]")
 
     def _style_for_level(self, level: LogLevel) -> str:
         return {
@@ -212,9 +216,10 @@ class AuditLogger:
         self.log(event_type, LogLevel.SECURITY, **kw)
 
     def close(self) -> None:
-        if self._db:
-            self._db.close()
-            self._db = None
+        with self._db_lock:
+            if self._db:
+                self._db.close()
+                self._db = None
 
     @contextmanager
     def timed(self, event_type: EventType, **kw: Any) -> Generator[dict, None, None]:
