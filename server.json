@@ -1,0 +1,59 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/registry/main/schemas/server.json",
+  "name": "mcp-spine",
+  "display_name": "MCP Spine",
+  "description": "Context Minifier & State Guard — Local-first MCP middleware proxy that reduces token waste by 61%, prevents context rot, and adds security hardening to all your MCP servers.",
+  "repository": {
+    "url": "https://github.com/Donnyb369/mcp-spine",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "license": "MIT",
+  "authors": ["Donnyb369"],
+  "categories": ["security", "middleware", "proxy", "developer-tools"],
+  "tags": ["mcp", "proxy", "middleware", "security", "token-optimization", "schema-minification", "state-guard", "semantic-routing", "audit", "rate-limiting", "windows"],
+  "installations": {
+    "pip": {
+      "command": "pip install mcp-spine",
+      "description": "Install from PyPI"
+    }
+  },
+  "config_example": {
+    "mcpServers": {
+      "spine": {
+        "command": "python",
+        "args": ["-u", "-m", "spine.cli", "serve", "--config", "spine.toml"],
+        "cwd": "/path/to/mcp-spine"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "spine_set_context",
+      "description": "Tell the Spine what you are currently working on to re-route visible tools"
+    },
+    {
+      "name": "spine_recall",
+      "description": "Recall cached results from previous tool calls"
+    },
+    {
+      "name": "spine_confirm",
+      "description": "Confirm a pending tool call that requires human approval"
+    },
+    {
+      "name": "spine_deny",
+      "description": "Deny a pending tool call"
+    }
+  ],
+  "features": [
+    "Schema minification (61% token savings)",
+    "Semantic routing with local embeddings",
+    "State Guard file version pinning",
+    "Secret scrubbing and HMAC audit trail",
+    "Human-in-the-loop confirmation",
+    "Tool output memory cache",
+    "SSE transport for remote servers",
+    "Concurrent server startup",
+    "Windows hardened"
+  ]
+}
