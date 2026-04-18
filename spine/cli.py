@@ -47,6 +47,8 @@ audit_db = "spine_audit.db"         # SQLite audit trail location
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-github"]
 # env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }
+# scramble_pii_in_responses = true   # Optional per-server output PII scrambling
+# scramble_pii_use_nlp = true        # Default; may download a spaCy model on first use
 
 # ── Semantic Routing (Stage 2) ──
 [routing]

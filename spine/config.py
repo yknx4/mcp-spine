@@ -36,6 +36,8 @@ class ServerConfig:
     max_retries: int = 2
     circuit_breaker_threshold: int = 3
     enabled: bool = True
+    scramble_pii_in_responses: bool = False  # output-only PII protection
+    scramble_pii_use_nlp: bool = True        # opt out to avoid spaCy model downloads
     transport: str = "stdio"          # "stdio" or "sse"
     url: str = ""                     # SSE endpoint URL
     headers: dict[str, str] = field(default_factory=dict)  # SSE auth headers
@@ -182,6 +184,8 @@ def parse_config(raw: dict[str, Any]) -> SpineConfig:
             max_retries=srv.get("max_retries", 2),
             circuit_breaker_threshold=srv.get("circuit_breaker_threshold", 3),
             enabled=srv.get("enabled", True),
+            scramble_pii_in_responses=srv.get("scramble_pii_in_responses", False),
+            scramble_pii_use_nlp=srv.get("scramble_pii_use_nlp", True),
             transport=srv.get("transport", "stdio"),
             url=srv.get("url", ""),
             headers=srv.get("headers", {}),

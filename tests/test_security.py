@@ -11,6 +11,7 @@ Covers:
   - Audit fingerprinting
 """
 
+import importlib.util
 
 import pytest
 
@@ -25,11 +26,14 @@ from spine.security import (
     hash_tool_schema,
     is_path_safe,
     resolve_env_vars,
+    scramble_pii,
+    scramble_pii_value,
     scrub_secrets,
     validate_message,
     validate_path,
     validate_server_command,
 )
+from spine.security.pii import PiiScramblerUnavailable
 from spine.security.policy import (
     PathPolicy,
     PolicyAction,
@@ -79,6 +83,59 @@ class TestSecretScrubbing:
         cleaned = scrub_secrets(text)
         assert "AKIAIOSFODNN7EXAMPLE" not in cleaned
         assert "ghp_" not in cleaned
+
+
+# ───────────────────────────────────────────────
+# PII Detection & Scrambling
+# ───────────────────────────────────────────────
+
+class TestPIIScrambling:
+    has_pii_deps = all(
+        importlib.util.find_spec(module)
+        for module in ("presidio_analyzer", "presidio_anonymizer", "faker")
+    )
+
+    def test_missing_optional_dependencies_raise_clear_error(self):
+        if self.has_pii_deps:
+            pytest.skip("PII optional dependencies are installed")
+
+        with pytest.raises(PiiScramblerUnavailable, match="Presidio|Faker"):
+            scramble_pii("Contact jane.doe@example.org", use_nlp=False)
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_email_scrambled(self):
+        text = "Contact jane.doe@sample.org for access"
+        scrambled = scramble_pii(text, use_nlp=False)
+        assert "jane.doe@sample.org" not in scrambled
+        assert "@" in scrambled
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_email_scrambling_is_deterministic(self):
+        text = "Email jane.doe@sample.org"
+        assert scramble_pii(text, use_nlp=False) == scramble_pii(text, use_nlp=False)
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_ssn_scrambled_but_keeps_shape(self):
+        scrambled = scramble_pii("ssn: 856-45-6789", use_nlp=False)
+        assert "856-45-6789" not in scrambled
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_phone_scrambled(self):
+        scrambled = scramble_pii("Call 415-867-5309", use_nlp=False)
+        assert "415-867-5309" not in scrambled
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_labeled_postal_code_scrambled_without_touching_plain_ids(self):
+        scrambled = scramble_pii("zip: 90210; order id 12345", use_nlp=False)
+        assert "90210" not in scrambled
+        assert "12345" in scrambled
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_deep_scramble_uses_structured_keys_as_context(self):
+        value = {"postal_code": "90210", "id": "12345"}
+        scrambled = scramble_pii_value(value, use_nlp=False)
+        assert scrambled["postal_code"] != "90210"
+        assert scrambled["id"] == "12345"
 
 
 # ───────────────────────────────────────────────

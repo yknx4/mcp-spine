@@ -16,6 +16,8 @@ name = "filesystem"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/your/project"]
 timeout_seconds = 120
+# scramble_pii_in_responses = true  # per-server output scrambling; requires mcp-spine[pii]
+# scramble_pii_use_nlp = true       # default; may download a spaCy model on first use
 
 # [[servers]]
 # name = "memory"

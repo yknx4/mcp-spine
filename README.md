@@ -64,6 +64,7 @@ The `-u` flag ensures unbuffered stdout, preventing pipe hangs on Windows.
 ### Stage 1: Security Proxy
 - JSON-RPC message validation and sanitization
 - Secret scrubbing (AWS keys, GitHub tokens, bearer tokens, private keys, connection strings)
+- Per-server PII scrambling for tool responses via Microsoft Presidio + Faker
 - Per-tool and global rate limiting with sliding windows
 - Path traversal prevention with symlink-aware jail
 - Command injection guards for server spawning
@@ -153,6 +154,8 @@ name = "sqlite"
 command = "uvx"
 args = ["mcp-server-sqlite", "--db-path", "/path/to/database.db"]
 timeout_seconds = 60
+scramble_pii_in_responses = true  # requires: pip install mcp-spine[pii]
+scramble_pii_use_nlp = true       # default; may download a spaCy model on first use
 
 [[servers]]
 name = "memory"
@@ -221,6 +224,7 @@ Defense-in-depth — every layer assumes the others might fail.
 | Prompt injection via tool args | Input validation, tool name allowlists |
 | Path traversal | Symlink-aware jail to `allowed_roots` |
 | Secret leakage | Automatic scrubbing of AWS keys, tokens, private keys |
+| PII leakage | Optional per-server response scrambling using Presidio recognizers and anonymizer operators |
 | Runaway agent loops | Per-tool + global rate limiting |
 | Command injection | Command allowlist, shell metacharacter blocking |
 | Denial of service | Message size limits, circuit breakers |
