@@ -119,7 +119,7 @@ class TestStatePin:
         assert "spine-state" in pin
         assert "sha:" in pin
         assert "v1" in pin
-        assert "RULE:" in pin
+        assert "Re-read before editing" in pin
 
     def test_pin_ordered_by_recency(self, tmp_path):
         guard = StateGuard(watch_paths=[str(tmp_path)])
