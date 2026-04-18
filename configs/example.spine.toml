@@ -34,6 +34,8 @@ name = "sqlite"
 command = "uvx"                     # or use a Python wrapper script
 args = ["mcp-server-sqlite", "--db-path", "/path/to/database.db"]
 timeout_seconds = 60
+scramble_pii_in_responses = true    # requires: pip install mcp-spine[pii]
+scramble_pii_use_nlp = true         # default; may download a spaCy model on first use
 
 [[servers]]
 name = "memory"
