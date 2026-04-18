@@ -7,6 +7,7 @@ so existing imports continue to work unchanged.
 
 Submodules:
   secrets     — credential detection & scrubbing
+  pii         — personal data scrambling
   paths       — path traversal jail
   validation  — JSON-RPC message checks
   commands    — server spawn guards
@@ -33,6 +34,11 @@ from spine.security.paths import (
     is_path_safe,
     validate_path,
 )
+from spine.security.pii import (
+    contains_pii,
+    scramble_pii,
+    scramble_pii_value,
+)
 from spine.security.rate_limit import (
     RateLimitBucket,
     RateLimiter,
@@ -55,6 +61,8 @@ from spine.security.validation import (
 __all__ = [
     # secrets
     "REDACTED", "contains_secret", "scrub_secrets",
+    # pii
+    "contains_pii", "scramble_pii", "scramble_pii_value",
     # paths
     "PathViolation", "is_path_safe", "validate_path",
     # validation

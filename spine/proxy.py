@@ -41,6 +41,7 @@ from spine.security import (
     RateLimiter,
     ValidationError,
     contains_secret,
+    scramble_pii_value,
     scrub_secrets,
 )
 from spine.state_guard import StateGuard
@@ -477,7 +478,8 @@ class SpineProxy:
           2. Rate limiting (per-tool and global)
           3. Path validation (if tool args contain file paths)
           4. Secret scrubbing (in responses, if enabled)
-          5. Audit logging (always)
+          5. PII scrambling (in responses, per server if enabled)
+          6. Audit logging (always)
         """
         # Wait for servers to be ready (background init)
         await self._wait_for_ready()
@@ -570,6 +572,13 @@ class SpineProxy:
         if self.config.security.scrub_secrets_in_responses:
             result = self._scrub_response(result)
 
+        # ── Security Check 6: Scramble PII in this server's response ──
+        if server.config.scramble_pii_in_responses:
+            result = self._scramble_pii_response(
+                result,
+                use_nlp=server.config.scramble_pii_use_nlp,
+            )
+
         # Stage 2: Record tool usage for recency-based reranking
         if self._router:
             self._router.record_tool_call(tool_name)
@@ -624,6 +633,10 @@ class SpineProxy:
     def _scrub_response(self, result: dict) -> dict:
         """Deep-scrub secrets from a tool response."""
         return json.loads(scrub_secrets(json.dumps(result)))
+
+    def _scramble_pii_response(self, result: dict, use_nlp: bool = True) -> dict:
+        """Deep-scramble PII from a tool response."""
+        return scramble_pii_value(result, use_nlp=use_nlp)
 
     def _clean_tool(self, tool: dict) -> dict:
         """Remove internal spine metadata from a tool before sending to client."""
