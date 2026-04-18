@@ -18,6 +18,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -63,14 +64,26 @@ def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     )
 
 
-def _run_postgres_or_skip(cmd: list[str]) -> subprocess.CompletedProcess:
+def _run_postgres_or_skip(
+    cmd: list[str],
+    *,
+    log_path: Path | None = None,
+) -> subprocess.CompletedProcess:
     try:
         return _run(cmd)
     except subprocess.CalledProcessError as exc:
-        stderr = exc.stderr or ""
-        if "could not create shared memory segment" in stderr or "Operation not permitted" in stderr:
-            pytest.skip(f"local Postgres cannot start in this environment: {stderr.strip()}")
-        raise
+        details = "\n".join(
+            part
+            for part in [
+                exc.stdout or "",
+                exc.stderr or "",
+                log_path.read_text(encoding="utf-8") if log_path and log_path.exists() else "",
+            ]
+            if part
+        )
+        if "could not create shared memory segment" in details or "Operation not permitted" in details:
+            pytest.skip(f"local Postgres cannot start in this environment: {details.strip()}")
+        raise AssertionError(f"Postgres command failed: {cmd}\n{details}") from exc
 
 
 def _sql_literal(value: str) -> str:
@@ -161,6 +174,7 @@ def temp_postgres(tmp_path: Path):
     data_dir = tmp_path / "pgdata"
     port = _free_port()
     log_path = tmp_path / "postgres.log"
+    socket_dir = Path(tempfile.mkdtemp(prefix="pgsock-", dir="/tmp"))
     password_file = tmp_path / "pg-password"
     password_file.write_text("password\n", encoding="utf-8")
 
@@ -182,10 +196,10 @@ def temp_postgres(tmp_path: Path):
         "-l",
         str(log_path),
         "-o",
-        f"-p {port} -h 127.0.0.1",
+        f"-p {port} -h 127.0.0.1 -k {socket_dir}",
         "-w",
         "start",
-    ])
+    ], log_path=log_path)
 
     uri = f"postgresql://postgres:password@127.0.0.1:{port}/postgres"
     try:
@@ -198,6 +212,7 @@ def temp_postgres(tmp_path: Path):
             stderr=subprocess.PIPE,
             check=False,
         )
+        shutil.rmtree(socket_dir, ignore_errors=True)
 
 
 def _seed_pii_table(psql: str, database_uri: str) -> tuple[list[str], list[str]]:
