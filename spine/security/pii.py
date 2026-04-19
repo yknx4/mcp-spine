@@ -586,7 +586,34 @@ def _should_use_structured_only(text: str) -> bool:
         flags=re.IGNORECASE,
     ):
         return True
+    if _looks_like_database_plan(text):
+        return True
     return False
+
+
+def _looks_like_database_plan(text: str) -> bool:
+    """
+    Detect PostgreSQL EXPLAIN/ANALYZE output.
+
+    Plan text is dense with costs, timings, row counts, operators, table names,
+    and index names. Generic PII recognizers create expensive false positives
+    there, especially by reading timing ranges as phone numbers or URLs. SQL
+    literal spans still run before this guard, so contextual PII such as
+    ``email = 'reader@example.com'`` can still be replaced.
+    """
+    plan_marker_count = 0
+    markers = (
+        r"\bPlanning Time:\s*\d",
+        r"\bExecution Time:\s*\d",
+        r"\bQUERY PLAN\b",
+        r"\b(?:Seq|Index(?: Only)?|Bitmap(?: Heap| Index)?) Scan\b",
+        r"\b(?:Nested Loop|Hash Join|Merge Join|Aggregate|Sort|Limit)\b",
+        r"\b(?:Cost|Actual|Rows|Loops):\s*[-+0-9.]",
+    )
+    for marker in markers:
+        if re.search(marker, text, flags=re.IGNORECASE):
+            plan_marker_count += 1
+    return plan_marker_count >= 2
 
 
 def _scramble_structured_text(text: str) -> str:

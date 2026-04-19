@@ -162,3 +162,64 @@ def test_real_readonly_top_queries_do_not_hide_metrics_or_sql_shape():
         "non-PII diagnostic metrics or query shape"
     )
     assert "[spine-state" not in text
+
+
+def test_real_production_explain_does_not_mangle_plan_metrics():
+    config_path = Path(os.environ.get("SPINE_REAL_CONFIG", "spine.toml"))
+    if not config_path.exists():
+        pytest.skip(f"real Spine config not found: {config_path}")
+
+    client = SpineClient(config_path)
+    try:
+        init = client.request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "real-spine-mcp-e2e", "version": "1.0"},
+            },
+        )
+        assert "error" not in init
+        client.notify("notifications/initialized")
+
+        tools = client.request("tools/list", {}, timeout=180)
+        tool_names = {tool["name"] for tool in tools["result"]["tools"]}
+        explain_tools = sorted(
+            name for name in tool_names if name.endswith("explain_query")
+        )
+        production_tools = [
+            name for name in explain_tools if "production" in name.lower()
+        ]
+        assert explain_tools, "real Spine config has no explain_query tool"
+        if len(explain_tools) > 1:
+            assert "explain_query" not in tool_names
+
+        response = client.request(
+            "tools/call",
+            {
+                "name": production_tools[0] if production_tools else explain_tools[0],
+                "arguments": {
+                    "analyze": True,
+                    "sql": (
+                        'SELECT COUNT(*) FROM "log_item_date_totals" '
+                        'WHERE "log_item_date_totals"."profile_id" = 7826034'
+                    ),
+                },
+            },
+            timeout=180,
+        )
+    finally:
+        client.close()
+
+    assert "error" not in response
+    text = _response_text(response)
+    assert "Error:" not in text
+    assert "Execution Time:" in text
+    assert re.search(r"\bID\d{6,}\b", text) is None, (
+        "explain response should not use ID-style placeholders for "
+        "non-PII diagnostic plan output"
+    )
+    assert re.search(r"\+?1?[- .(]*\d{3}[- .)]*\d{3}[- .]*\d{4}x\d+", text) is None, (
+        "explain response should not replace timings with fake phone numbers"
+    )
+    assert "[spine-state" not in text

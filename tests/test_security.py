@@ -280,6 +280,47 @@ class TestPIIScrambling:
         assert "[URL]" not in scrambled
 
     @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_explain_plan_preserves_timings_and_index_names(self, monkeypatch):
+        monkeypatch.setattr(pii_module, "_fake_value", lambda entity, value: f"[{entity}]")
+        text = (
+            "Planning Time: 0.420 ms\n"
+            "Execution Time: 114.915 ms\n"
+            "-> Aggregate (Cost: 7.93..7.94) [Rows: 1] "
+            "[Actual: 1.565..1.654 ms, Rows: 1, Loops: 1]\n"
+            "  -> Index Only Scan using "
+            "index_log_item_date_totals_on_profile_id_and_date "
+            "on log_item_date_totals (Cost: 0.57..7.29) [Rows: 258] "
+            "[Actual: 17.08..114.75 ms, Rows: 1783, Loops: 1]"
+        )
+
+        scrambled = scramble_pii(text, use_nlp=True)
+
+        assert "Execution Time: 114.915 ms" in scrambled
+        assert "Actual: 1.565..1.654 ms" in scrambled
+        assert "Actual: 17.08..114.75 ms" in scrambled
+        assert "index_log_item_date_totals_on_profile_id_and_date" in scrambled
+        assert "log_item_date_totals" in scrambled
+        assert "[PHONE_NUMBER]" not in scrambled
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_explain_plan_still_scrambles_contextual_sql_literals(self, monkeypatch):
+        monkeypatch.setattr(pii_module, "_fake_value", lambda entity, value: f"[{entity}]")
+        text = (
+            "Index Scan using index_users_on_email on users "
+            "(Cost: 0.42..8.44) [Rows: 1] [Actual: 0.012..0.014 ms, Rows: 1, Loops: 1]\n"
+            "  Filter: (email = 'reader@example.com'::text)\n"
+            "Planning Time: 0.200 ms\n"
+            "Execution Time: 0.050 ms"
+        )
+
+        scrambled = scramble_pii(text, use_nlp=True)
+
+        assert "reader@example.com" not in scrambled
+        assert "[EMAIL_ADDRESS]" in scrambled
+        assert "index_users_on_email" in scrambled
+        assert "Actual: 0.012..0.014 ms" in scrambled
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
     def test_stringified_row_output_stays_parseable_after_scrambling(self, monkeypatch):
         monkeypatch.setattr(pii_module, "_fake_value", lambda entity, value: f"[{entity}]")
         text = (
