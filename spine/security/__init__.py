@@ -7,6 +7,7 @@ so existing imports continue to work unchanged.
 
 Submodules:
   secrets     — credential detection & scrubbing
+  pii         — personal data scrambling
   paths       — path traversal jail
   validation  — JSON-RPC message checks
   commands    — server spawn guards

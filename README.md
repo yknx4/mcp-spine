@@ -73,6 +73,7 @@ The `-u` flag ensures unbuffered stdout, preventing pipe hangs on Windows.
 ### Stage 1: Security Proxy
 - JSON-RPC message validation and sanitization
 - Secret scrubbing (AWS keys, GitHub tokens, bearer tokens, private keys, connection strings)
+- Per-server PII scrambling for tool responses via Microsoft Presidio + Faker
 - Per-tool and global rate limiting with sliding windows
 - Path traversal prevention with symlink-aware jail
 - Command injection guards for server spawning
@@ -178,6 +179,8 @@ name = "sqlite"
 command = "uvx"
 args = ["mcp-server-sqlite", "--db-path", "/path/to/database.db"]
 timeout_seconds = 60
+scramble_pii_in_responses = true  # requires: pip install mcp-spine[pii]
+scramble_pii_use_nlp = true       # default; may download a spaCy model on first use
 
 [[servers]]
 name = "memory"
@@ -243,6 +246,31 @@ allowed_roots = ["/path/to/project"]
 denied_patterns = ["**/.env", "**/*.key", "**/*.pem"]
 ```
 
+## Importing multi-mcp Settings
+
+Use the converter when you already have a `multi-mcp` `mcp.json`.
+The default keeps `multi-mcp` between Spine and the original backend servers:
+
+```bash
+python scripts/translate_multi_mcp.py /path/to/multi-mcp/mcp.json \
+  --multi-mcp-dir /path/to/multi-mcp \
+  --output spine.toml
+```
+
+This produces:
+
+```text
+MCP client -> mcp-spine -> multi-mcp -> backend MCP servers
+```
+
+To fully migrate the individual backend servers into native Spine config instead:
+
+```bash
+python scripts/translate_multi_mcp.py /path/to/multi-mcp/mcp.json \
+  --mode direct \
+  --output spine.toml
+```
+
 ## Security Model
 
 Defense-in-depth — every layer assumes the others might fail.
@@ -252,6 +280,7 @@ Defense-in-depth — every layer assumes the others might fail.
 | Prompt injection via tool args | Input validation, tool name allowlists |
 | Path traversal | Symlink-aware jail to `allowed_roots` |
 | Secret leakage | Automatic scrubbing of AWS keys, tokens, private keys |
+| PII leakage | Optional per-server response scrambling using Presidio recognizers and anonymizer operators |
 | Runaway agent loops | Per-tool + global rate limiting |
 | Command injection | Command allowlist, shell metacharacter blocking |
 | Denial of service | Message size limits, circuit breakers |
