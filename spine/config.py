@@ -36,52 +36,44 @@ class ServerConfig:
     max_retries: int = 2
     circuit_breaker_threshold: int = 3
     enabled: bool = True
-    scramble_pii_in_responses: bool = False  # output-only PII protection
-    scramble_pii_use_nlp: bool = True        # opt out to avoid spaCy model downloads
-    transport: str = "stdio"          # "stdio" or "sse"
-    url: str = ""                     # SSE endpoint URL
-    headers: dict[str, str] = field(default_factory=dict)  # SSE auth headers
+    transport: str = "stdio"
+    url: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
+    scramble_pii_in_responses: bool = False
+    scramble_pii_use_nlp: bool = True
 
     def validate(self, allowed_commands: frozenset[str]) -> list[str]:
-        """Validate this server config. Returns list of warnings."""
         warnings = []
-
         if self.transport == "sse":
-            # SSE servers need a URL, not a command
             if not self.url:
                 raise ValueError(f"Server '{self.name}': SSE transport requires 'url'")
             if not self.url.startswith(("http://", "https://")):
                 raise ValueError(f"Server '{self.name}': SSE url must start with http:// or https://")
         else:
-            # stdio servers need a valid command
             if not self.command:
                 raise ValueError(f"Server '{self.name}': stdio transport requires 'command'")
             try:
                 validate_server_command(self.command, self.args, allowed_commands)
             except Exception as e:
                 raise ValueError(f"Server '{self.name}': {e}") from e
-
         if self.timeout_seconds <= 0:
             raise ValueError(f"Server '{self.name}': timeout must be positive")
         if self.timeout_seconds > 300:
             warnings.append(f"Server '{self.name}': timeout {self.timeout_seconds}s is very long")
-
         return warnings
 
 
 @dataclass
 class RoutingConfig:
-    """Semantic routing configuration."""
     max_tools: int = 5
     always_include: list[str] = field(default_factory=lambda: ["spine_set_context"])
     embedding_model: str = "all-MiniLM-L6-v2"
     rerank: bool = True
-    similarity_threshold: float = 0.3  # minimum cosine similarity to include
+    similarity_threshold: float = 0.3
 
 
 @dataclass
 class StateGuardConfig:
-    """State Guard configuration."""
     enabled: bool = True
     watch_paths: list[str] = field(default_factory=lambda: ["."])
     ignore_patterns: list[str] = field(default_factory=lambda: [
@@ -94,21 +86,27 @@ class StateGuardConfig:
         "**/.DS_Store",
     ])
     max_tracked_files: int = 200
-    max_pin_files: int = 20       # max files in the state pin message
-    snippet_length: int = 200     # chars of file preview in pin
+    max_pin_files: int = 20
+    snippet_length: int = 200
 
 
 @dataclass
 class MinifierConfig:
-    """Schema minification settings."""
-    level: int = 2                # 0=off, 1=light, 2=standard, 3=aggressive
+    level: int = 2
     max_description_length: int = 120
     preserve_required: bool = True
 
 
 @dataclass
+class TokenBudgetConfig:
+    """Daily token budget settings."""
+    daily_limit: int = 0
+    warn_at: float = 0.8
+    action: str = "warn"
+
+
+@dataclass
 class SpineConfig:
-    """Root configuration for the MCP Spine."""
     log_level: str = "info"
     log_file: str | None = None
     audit_db: str = "spine_audit.db"
@@ -117,64 +115,52 @@ class SpineConfig:
     routing: RoutingConfig = field(default_factory=RoutingConfig)
     state_guard: StateGuardConfig = field(default_factory=StateGuardConfig)
     minifier: MinifierConfig = field(default_factory=MinifierConfig)
+    token_budget: TokenBudgetConfig = field(default_factory=TokenBudgetConfig)
     security: SecurityPolicy = field(default_factory=SecurityPolicy)
 
     def validate(self) -> list[str]:
-        """Validate entire config. Returns warnings, raises on errors."""
         warnings = []
-
         if not self.servers:
             warnings.append("No downstream servers configured")
-
         seen_names = set()
         for server in self.servers:
             if server.name in seen_names:
                 raise ValueError(f"Duplicate server name: {server.name!r}")
             seen_names.add(server.name)
             warnings.extend(server.validate(self.security.allowed_commands))
-
         if self.routing.max_tools < 1:
             raise ValueError("routing.max_tools must be >= 1")
         if self.routing.max_tools > 50:
             warnings.append(f"routing.max_tools={self.routing.max_tools} is very high")
-
         if self.minifier.level not in range(4):
             raise ValueError("minifier.level must be 0-3")
-
+        if self.token_budget.daily_limit < 0:
+            raise ValueError("token_budget.daily_limit must be >= 0")
+        if not 0.0 <= self.token_budget.warn_at <= 1.0:
+            raise ValueError("token_budget.warn_at must be between 0.0 and 1.0")
+        if self.token_budget.action not in ("warn", "block"):
+            raise ValueError("token_budget.action must be 'warn' or 'block'")
         return warnings
 
 
 def load_config(path: str | Path) -> SpineConfig:
-    """
-    Load and validate configuration from a TOML file.
-
-    Resolves environment variables in server env blocks.
-    Validates all security-sensitive fields.
-    """
     config_path = Path(path)
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
-
     with open(config_path, "rb") as f:
         raw = tomllib.load(f)
-
     return parse_config(raw)
 
 
 def parse_config(raw: dict[str, Any]) -> SpineConfig:
-    """Parse a raw dict (from TOML) into a validated SpineConfig."""
     spine_section = raw.get("spine", {})
-
-    # Load security policy first (needed for server validation)
     security = load_security_policy(raw)
 
-    # Parse servers
     servers = []
     for srv in raw.get("servers", []):
         env = {}
         if "env" in srv:
             env = safe_env_dict(srv["env"])
-
         servers.append(ServerConfig(
             name=srv["name"],
             command=srv.get("command", ""),
@@ -184,14 +170,13 @@ def parse_config(raw: dict[str, Any]) -> SpineConfig:
             max_retries=srv.get("max_retries", 2),
             circuit_breaker_threshold=srv.get("circuit_breaker_threshold", 3),
             enabled=srv.get("enabled", True),
-            scramble_pii_in_responses=srv.get("scramble_pii_in_responses", False),
-            scramble_pii_use_nlp=srv.get("scramble_pii_use_nlp", True),
             transport=srv.get("transport", "stdio"),
             url=srv.get("url", ""),
             headers=srv.get("headers", {}),
+            scramble_pii_in_responses=srv.get("scramble_pii_in_responses", False),
+            scramble_pii_use_nlp=srv.get("scramble_pii_use_nlp", True),
         ))
 
-    # Parse routing
     routing_raw = raw.get("routing", {})
     routing = RoutingConfig(
         max_tools=routing_raw.get("max_tools", 5),
@@ -201,7 +186,6 @@ def parse_config(raw: dict[str, Any]) -> SpineConfig:
         similarity_threshold=routing_raw.get("similarity_threshold", 0.3),
     )
 
-    # Parse state guard
     sg_raw = raw.get("state_guard", {})
     state_guard = StateGuardConfig(
         enabled=sg_raw.get("enabled", True),
@@ -212,12 +196,18 @@ def parse_config(raw: dict[str, Any]) -> SpineConfig:
         snippet_length=sg_raw.get("snippet_length", 200),
     )
 
-    # Parse minifier
     min_raw = raw.get("minifier", {})
     minifier = MinifierConfig(
         level=min_raw.get("level", 2),
         max_description_length=min_raw.get("max_description_length", 120),
         preserve_required=min_raw.get("preserve_required", True),
+    )
+
+    tb_raw = raw.get("token_budget", {})
+    token_budget = TokenBudgetConfig(
+        daily_limit=tb_raw.get("daily_limit", 0),
+        warn_at=tb_raw.get("warn_at", 0.8),
+        action=tb_raw.get("action", "warn"),
     )
 
     config = SpineConfig(
@@ -228,8 +218,8 @@ def parse_config(raw: dict[str, Any]) -> SpineConfig:
         routing=routing,
         state_guard=state_guard,
         minifier=minifier,
+        token_budget=token_budget,
         security=security,
     )
-
     config.validate()
     return config

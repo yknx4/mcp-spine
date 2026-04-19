@@ -1,3 +1,4 @@
+# ruff: noqa: S608
 """
 End-to-end PII scrambling test with a real Postgres MCP server.
 
@@ -216,73 +217,207 @@ def temp_postgres(tmp_path: Path):
 
 
 def _seed_pii_table(psql: str, database_uri: str) -> tuple[list[str], list[str]]:
-    try:
-        from faker import Faker
-    except ImportError:
-        pytest.skip("Faker is required for postgres PII e2e data generation")
-
-    fake = Faker("en_US")
-    Faker.seed(8675309)
-
     pii_values = {
-        "email": fake.email(),
-        "phone": "415-867-5309",
-        "ssn": fake.ssn(),
-        "credit_card": fake.credit_card_number(card_type="visa"),
-        "ip_address": fake.ipv4_public(),
-        "mac_address": fake.mac_address(),
-        "iban": fake.iban(),
-        "homepage_url": fake.url(),
-        "postal_code": f"{fake.postcode().split('-')[0]}-4321",
-        "birth_date": fake.date_of_birth(minimum_age=25, maximum_age=75).isoformat(),
-        "crypto_wallet": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+        "email": "private.user@example.org",
+        "parent_email_address": "guardian@example.org",
+        "phone_number": "415-867-5309",
+        "current_sign_in_ip": "198.51.100.10",
+        "last_sign_in_ip": "198.51.100.11",
+        "zipcode": "90210",
+        "library_card_number": "LC-12345",
+        "username": "reader-login",
+        "reset_password_token": "reset-token-abc",
+        "otp_secret": "otp-secret-plain",
+        "profile_birthdate": "2012-05-06",
+        "profile_phone_number": "212-555-0199",
+        "profile_zipcode": "10001",
+        "cultural_pass_number": "CP-98765",
     }
     safe_values = {
-        "safe_code": "BOOK-ALPHA",
-        "safe_label": "public aggregate row",
-        "safe_count": "42",
+        "user_id": "1",
+        "profile_id": "10",
+        "profile_user_id": "1",
+        "school_student_id": "12345",
+        "user_first_name": "Jane",
+        "user_last_name": "Reader",
+        "profile_first_name": "Sam",
+        "profile_last_name": "Booker",
+        "role": "reader",
+        "encrypted_pin": "pin-secret-abc",
+        "encrypted_otp_secret": "otp-secret-encrypted",
     }
 
-    values = [*pii_values.values(), *safe_values.values()]
-    quoted_values = ", ".join(_sql_literal(value) for value in values)
-    sql = """
+    sql = f"""
         DROP TABLE IF EXISTS users;
+        DROP TABLE IF EXISTS profiles;
         CREATE TABLE users (
             id integer PRIMARY KEY,
-            email text,
-            phone text,
-            ssn text,
-            credit_card text,
-            ip_address text,
-            mac_address text,
-            iban text,
-            homepage_url text,
-            postal_code text,
-            birth_date text,
-            crypto_wallet text,
-            safe_code text,
-            safe_label text,
-            safe_count integer
+            email character varying DEFAULT '',
+            encrypted_password character varying NOT NULL DEFAULT '',
+            reset_password_token character varying,
+            reset_password_sent_at timestamp without time zone,
+            remember_created_at timestamp without time zone,
+            sign_in_count integer NOT NULL DEFAULT 0,
+            current_sign_in_at timestamp without time zone,
+            last_sign_in_at timestamp without time zone,
+            current_sign_in_ip inet,
+            last_sign_in_ip inet,
+            created_at timestamp without time zone,
+            updated_at timestamp without time zone,
+            microsite_id integer,
+            role character varying,
+            deactivated boolean,
+            first_name character varying,
+            last_name character varying,
+            state integer NOT NULL DEFAULT 1,
+            zipcode character varying,
+            has_library_card boolean,
+            library_card_number character varying,
+            language character varying,
+            partner_id integer,
+            library_branch_id integer,
+            phone_number character varying,
+            username character varying,
+            parent_email_address character varying,
+            default_profile_id integer,
+            source_page character varying,
+            encrypted_pin character varying,
+            assumed_teen_or_adult boolean DEFAULT true,
+            self_registered boolean DEFAULT false,
+            military_branch character varying,
+            military_sponsor_status character varying,
+            provider character varying NOT NULL DEFAULT 'email',
+            uid uuid,
+            tokens jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+            mobile_app_user boolean DEFAULT false,
+            department_id bigint,
+            region_id bigint,
+            team_id bigint,
+            encrypted_otp_secret character varying,
+            encrypted_otp_secret_iv character varying,
+            encrypted_otp_secret_salt character varying,
+            consumed_timestep integer,
+            otp_required_for_login boolean,
+            otp_method integer,
+            demo_user boolean,
+            otp_secret character varying,
+            unsynced boolean NOT NULL DEFAULT false
+        );
+        CREATE TABLE profiles (
+            id integer PRIMARY KEY,
+            birthdate date,
+            state integer NOT NULL DEFAULT 1,
+            user_id integer,
+            first_name character varying,
+            childs_name_honorific character varying,
+            customized_filters text,
+            notes text,
+            created_at timestamp without time zone,
+            updated_at timestamp without time zone,
+            microsite_id integer,
+            send_notifications boolean DEFAULT true,
+            grade_level_id integer,
+            send_recommendations boolean DEFAULT true,
+            gender character varying,
+            profile_type character varying DEFAULT 'Child',
+            library_branch_id integer,
+            school_id integer,
+            school_student_id integer,
+            last_name character varying,
+            library_card_number character varying,
+            has_library_card boolean,
+            partner_id integer,
+            zipcode character varying,
+            local_area_id integer,
+            logged_books_count integer,
+            earned_badges_count integer,
+            earned_rewards_count integer,
+            cultural_pass_number character varying,
+            phone_number character varying,
+            age double precision NOT NULL,
+            teacher_id integer,
+            profile_weight integer NOT NULL DEFAULT 1,
+            last_personalized_at timestamp without time zone,
+            ethnicity_id integer,
+            reading_group_id integer,
+            image_file_name character varying,
+            image_content_type character varying,
+            image_file_size integer,
+            image_updated_at timestamp without time zone,
+            mobile_app_user boolean DEFAULT false,
+            department_id bigint,
+            region_id bigint,
+            team_id bigint,
+            connected_profile_id integer,
+            demo_user boolean,
+            verified_at timestamp without time zone,
+            suspended_at timestamp without time zone,
+            first_name_tsv tsvector,
+            last_name_tsv tsvector
         );
         INSERT INTO users (
             id,
             email,
-            phone,
-            ssn,
-            credit_card,
-            ip_address,
-            mac_address,
-            iban,
-            homepage_url,
-            postal_code,
-            birth_date,
-            crypto_wallet,
-            safe_code,
-            safe_label,
-            safe_count
+            role,
+            phone_number,
+            current_sign_in_ip,
+            last_sign_in_ip,
+            zipcode,
+            library_card_number,
+            username,
+            parent_email_address,
+            reset_password_token,
+            encrypted_pin,
+            encrypted_otp_secret,
+            otp_secret,
+            first_name,
+            last_name
         )
-        VALUES (1, __VALUES__);
-    """.replace("__VALUES__", quoted_values)
+        VALUES (
+            1,
+            {_sql_literal(pii_values["email"])},
+            {_sql_literal(safe_values["role"])},
+            {_sql_literal(pii_values["phone_number"])},
+            {_sql_literal(pii_values["current_sign_in_ip"])},
+            {_sql_literal(pii_values["last_sign_in_ip"])},
+            {_sql_literal(pii_values["zipcode"])},
+            {_sql_literal(pii_values["library_card_number"])},
+            {_sql_literal(pii_values["username"])},
+            {_sql_literal(pii_values["parent_email_address"])},
+            {_sql_literal(pii_values["reset_password_token"])},
+            {_sql_literal(safe_values["encrypted_pin"])},
+            {_sql_literal(safe_values["encrypted_otp_secret"])},
+            {_sql_literal(pii_values["otp_secret"])},
+            {_sql_literal(safe_values["user_first_name"])},
+            {_sql_literal(safe_values["user_last_name"])}
+        );
+        INSERT INTO profiles (
+            id,
+            user_id,
+            birthdate,
+            first_name,
+            last_name,
+            library_card_number,
+            zipcode,
+            cultural_pass_number,
+            phone_number,
+            school_student_id,
+            age
+        )
+        VALUES (
+            {safe_values["profile_id"]},
+            {safe_values["profile_user_id"]},
+            {_sql_literal(pii_values["profile_birthdate"])},
+            {_sql_literal(safe_values["profile_first_name"])},
+            {_sql_literal(safe_values["profile_last_name"])},
+            {_sql_literal(pii_values["library_card_number"])},
+            {_sql_literal(pii_values["profile_zipcode"])},
+            {_sql_literal(pii_values["cultural_pass_number"])},
+            {_sql_literal(pii_values["profile_phone_number"])},
+            {safe_values["school_student_id"]},
+            10
+        );
+    """
     _run([psql, database_uri, "-v", "ON_ERROR_STOP=1", "-c", sql])
     return list(pii_values.values()), list(safe_values.values())
 
@@ -350,25 +485,33 @@ def test_postgres_mcp_responses_do_not_leak_real_pii(tmp_path: Path, temp_postgr
         tool_names = {tool["name"] for tool in tools["result"]["tools"]}
         assert "execute_sql" in tool_names
 
-        response = client.request(
+        users_response = client.request(
             "tools/call",
             {
                 "name": "execute_sql",
                 "arguments": {
-                    "sql": (
-                        "SELECT email, phone, ssn, credit_card, ip_address, mac_address, "
-                        "iban, homepage_url, postal_code, birth_date, crypto_wallet, "
-                        "safe_code, safe_label, safe_count FROM users ORDER BY id"
-                    ),
+                    "sql": "SELECT users.* FROM users ORDER BY id",
                 },
             },
             timeout=180,
         )
-        assert "error" not in response
+        assert "error" not in users_response
 
-        text = _response_text(response)
+        profiles_response = client.request(
+            "tools/call",
+            {
+                "name": "execute_sql",
+                "arguments": {
+                    "sql": "SELECT profiles.* FROM profiles ORDER BY id",
+                },
+            },
+            timeout=180,
+        )
+        assert "error" not in profiles_response
+
+        text = _response_text(users_response) + _response_text(profiles_response)
         leaked = [value for value in pii_values if value and value in text]
-        assert leaked == []
+        assert leaked == [], f"leaked={leaked}\n{text}"
 
         for value in safe_values:
             assert value in text

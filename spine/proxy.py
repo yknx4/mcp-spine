@@ -22,9 +22,11 @@ import asyncio
 import json
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from spine.audit import AuditLogger, EventType, LogLevel
+from spine.budget import TokenBudget, estimate_tokens
 from spine.config import SpineConfig
 from spine.minifier import SchemaMinifier
 from spine.protocol import (
@@ -57,8 +59,9 @@ class SpineProxy:
     and writes responses to stdout.
     """
 
-    def __init__(self, config: SpineConfig):
+    def __init__(self, config: SpineConfig, config_path: str | None = None):
         self.config = config
+        self._config_path = config_path
         self.logger = AuditLogger(
             db_path=config.audit_db,
             level=LogLevel[config.log_level.upper()],
@@ -110,6 +113,14 @@ class SpineProxy:
                 snippet_length=config.state_guard.snippet_length,
             )
 
+        # Token Budget (daily spend tracker)
+        self._budget = TokenBudget(
+            daily_limit=config.token_budget.daily_limit,
+            warn_at=config.token_budget.warn_at,
+            action=config.token_budget.action,
+            db_path=config.audit_db,
+        )
+
         # Human-in-the-loop: pending confirmations
         self._pending_confirmations: dict[str, dict] = {}
         self._confirmation_counter = 0
@@ -154,6 +165,13 @@ class SpineProxy:
                 EventType.STARTUP,
                 component="state_guard",
                 watch_paths=self.config.state_guard.watch_paths,
+            )
+
+        # Start config hot-reload watcher
+        if self._config_path:
+            asyncio.create_task(
+                self._watch_config(),
+                name="config-watcher",
             )
 
         # Enter main proxy loop
@@ -236,6 +254,8 @@ class SpineProxy:
         self._running = False
         self.logger.info(EventType.SHUTDOWN)
         await self.pool.shutdown_all()
+        if getattr(self, "_budget", None) is not None:
+            self._budget.close()
         self.logger.close()
 
     async def _background_init(self) -> None:
@@ -323,6 +343,120 @@ class SpineProxy:
                 message=f"Router init failed: {e}. Semantic routing disabled.",
             )
             self._router = None
+
+    async def _watch_config(self) -> None:
+        """Watch the config file for changes and hot-reload safe settings."""
+        import hashlib
+
+        config_path = Path(self._config_path)
+        if not config_path.exists():
+            return
+
+        last_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
+
+        while self._running:
+            await asyncio.sleep(2.0)  # Poll every 2 seconds
+            try:
+                if not config_path.exists():
+                    continue
+                current_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
+                if current_hash != last_hash:
+                    last_hash = current_hash
+                    self._hot_reload(config_path)
+            except (OSError, PermissionError):
+                continue
+
+    def _hot_reload(self, config_path: Path) -> None:
+        """
+        Reload config and apply safe changes without restarting servers.
+
+        Hot-reloadable (no restart needed):
+          - Minifier level
+          - Rate limits (global + per-tool)
+          - Security policies (tool allow/deny, path rules)
+          - Token budget settings
+          - State guard ignore patterns
+
+        NOT hot-reloadable (requires full restart):
+          - Server list (adding/removing servers)
+          - Server commands/args/env
+          - Audit DB path
+          - Routing model
+        """
+        from spine.config import load_config
+
+        try:
+            new_config = load_config(str(config_path))
+        except Exception as e:
+            self.logger.warn(
+                EventType.STARTUP,
+                component="config_reload",
+                message=f"Config reload failed: {e}",
+            )
+            return
+
+        changes = []
+
+        # Minifier level
+        if new_config.minifier.level != self.config.minifier.level:
+            self._minifier = SchemaMinifier(
+                level=new_config.minifier.level,
+                max_description_length=new_config.minifier.max_description_length,
+                preserve_required=new_config.minifier.preserve_required,
+            )
+            changes.append(f"minifier level {self.config.minifier.level} -> {new_config.minifier.level}")
+
+        # Rate limits
+        if (new_config.security.global_rate_limit != self.config.security.global_rate_limit
+                or new_config.security.per_tool_rate_limit != self.config.security.per_tool_rate_limit):
+            self.rate_limiter = RateLimiter(
+                default_max_calls=new_config.security.per_tool_rate_limit,
+                default_window=60.0,
+            )
+            changes.append(
+                f"rate limits: global={new_config.security.global_rate_limit}, "
+                f"per_tool={new_config.security.per_tool_rate_limit}"
+            )
+
+        # Security policies
+        if new_config.security.tool_policies != self.config.security.tool_policies:
+            changes.append("security policies updated")
+
+        # Token budget
+        tb_old = self.config.token_budget
+        tb_new = new_config.token_budget
+        if (tb_new.daily_limit != tb_old.daily_limit
+                or tb_new.warn_at != tb_old.warn_at
+                or tb_new.action != tb_old.action):
+            self._budget.daily_limit = tb_new.daily_limit
+            self._budget.warn_at = tb_new.warn_at
+            self._budget.action = tb_new.action
+            changes.append(
+                f"token budget: {tb_new.daily_limit}/day, "
+                f"warn={tb_new.warn_at}, action={tb_new.action}"
+            )
+
+        # State guard ignore patterns
+        if (self._state_guard
+                and new_config.state_guard.ignore_patterns != self.config.state_guard.ignore_patterns):
+            self._state_guard.ignore_patterns = new_config.state_guard.ignore_patterns
+            changes.append("state guard ignore patterns updated")
+
+        # Apply the new config
+        self.config = new_config
+
+        if changes:
+            self.logger.info(
+                EventType.STARTUP,
+                component="config_reload",
+                message=f"Config reloaded: {'; '.join(changes)}",
+            )
+        else:
+            self.logger.info(
+                EventType.STARTUP,
+                component="config_reload",
+                message="Config file changed but no actionable differences",
+            )
 
     async def _wait_for_ready(self, timeout: float = 120.0) -> None:
         """Wait for background initialization to complete."""
@@ -446,6 +580,10 @@ class SpineProxy:
         if "spine_recall" not in tool_names:
             allowed_tools.append(self._get_recall_meta_tool())
 
+        # Inject spine_budget meta-tool
+        if "spine_budget" not in tool_names:
+            allowed_tools.append(self._get_budget_meta_tool())
+
         # Inject confirmation meta-tools if any tool policies use require_confirmation
         has_confirmation_tools = any(
             tp.require_confirmation for tp in self.config.security.tool_policies
@@ -478,8 +616,7 @@ class SpineProxy:
           2. Rate limiting (per-tool and global)
           3. Path validation (if tool args contain file paths)
           4. Secret scrubbing (in responses, if enabled)
-          5. PII scrambling (in responses, per server if enabled)
-          6. Audit logging (always)
+          5. Audit logging (always)
         """
         # Wait for servers to be ready (background init)
         await self._wait_for_ready()
@@ -547,10 +684,32 @@ class SpineProxy:
         if tool_name == "spine_recall":
             return self._handle_recall(msg_id, arguments)
 
-        # ── Security Check 5: Human-in-the-loop ──
-        policy = self.config.security.get_tool_policy(tool_name)
-        if policy and policy.require_confirmation:
-            return self._request_confirmation(msg_id, tool_name, arguments, message)
+        # ── Handle spine_budget meta-tool ──
+        if tool_name == "spine_budget":
+            return self._handle_budget(msg_id, arguments)
+
+        # ── Token Budget: pre-call block ──
+        if (
+            self.config.token_budget.action == "block"
+            and self._budget.is_over_budget()
+        ):
+            stats = self._budget.stats()
+            self.logger.security(
+                EventType.POLICY_DENY,
+                tool_name=tool_name,
+                reason="token_budget_exceeded",
+                tokens_used=stats["tokens_used"],
+                tokens_limit=stats["daily_limit"],
+            )
+            return make_error(
+                msg_id,
+                TOOL_BLOCKED,
+                (
+                    f"Token budget exceeded. "
+                    f"Used {stats['tokens_used']} of {stats['daily_limit']} "
+                    f"tokens today."
+                ),
+            )
 
         # ── Route to downstream server ──
         server = self.pool.route_tool(tool_name)
@@ -558,6 +717,19 @@ class SpineProxy:
             return make_error(
                 msg_id, TOOL_NOT_FOUND,
                 f"No server available for tool '{tool_name}'"
+            )
+
+        display_arguments = self._scramble_pii_arguments(arguments, server)
+
+        # ── Security Check 5: Human-in-the-loop ──
+        policy = self.config.security.get_tool_policy(tool_name)
+        if policy and policy.require_confirmation:
+            return self._request_confirmation(
+                msg_id,
+                tool_name,
+                arguments,
+                message,
+                display_arguments=display_arguments,
             )
 
         # ── Execute with timing ──
@@ -588,7 +760,33 @@ class SpineProxy:
             result = self._state_guard.inject_pin_into_response(result)
 
         # Cache tool result in memory
-        self._memory.store(tool_name, arguments, result.get("result", result))
+        self._memory.store(tool_name, display_arguments, result.get("result", result))
+
+        # ── Token Budget: record + maybe inject warning ──
+        response_payload = result.get("result", result)
+        req_tokens = estimate_tokens(arguments)
+        resp_tokens = estimate_tokens(response_payload)
+        total_tokens = req_tokens + resp_tokens
+        self._budget.record(total_tokens)
+
+        if self.config.token_budget.action == "warn":
+            if self._budget.should_fire_warning():
+                stats = self._budget.stats()
+                banner = (
+                    f"[SPINE] Warning: "
+                    f"{int(stats['usage_pct'] * 100)}% of daily token budget "
+                    f"used ({stats['tokens_used']}/{stats['daily_limit']} "
+                    f"tokens)"
+                )
+                response_payload = self._inject_banner(response_payload, banner)
+                self.logger.warn(
+                    EventType.TOOL_RESPONSE,
+                    tool_name=tool_name,
+                    reason="token_budget_warn_threshold",
+                    tokens_used=stats["tokens_used"],
+                    tokens_limit=stats["daily_limit"],
+                    usage_pct=stats["usage_pct"],
+                )
 
         # ── Audit Log ──
         self.logger.info(
@@ -596,9 +794,11 @@ class SpineProxy:
             tool_name=tool_name,
             server_name=server.name,
             success="error" not in result,
+            tokens_used_today=self._budget.used(),
+            tokens_this_call=total_tokens,
         )
 
-        return make_response(msg_id, result.get("result", result))
+        return make_response(msg_id, response_payload)
 
     def _check_global_rate_limit(self) -> bool:
         """Check global rate limit across all tools."""
@@ -637,6 +837,15 @@ class SpineProxy:
     def _scramble_pii_response(self, result: dict, use_nlp: bool = True) -> dict:
         """Deep-scramble PII from a tool response."""
         return scramble_pii_value(result, use_nlp=use_nlp)
+
+    def _scramble_pii_arguments(self, arguments: dict, server: Any) -> dict:
+        """Deep-scramble PII from tool arguments before display/cache surfaces."""
+        if not server.config.scramble_pii_in_responses:
+            return arguments
+        return scramble_pii_value(
+            arguments,
+            use_nlp=server.config.scramble_pii_use_nlp,
+        )
 
     def _clean_tool(self, tool: dict) -> dict:
         """Remove internal spine metadata from a tool before sending to client."""
@@ -792,7 +1001,8 @@ class SpineProxy:
 
     def _request_confirmation(
         self, msg_id: int | str, tool_name: str,
-        arguments: dict[str, Any], original_message: dict
+        arguments: dict[str, Any], original_message: dict,
+        display_arguments: dict[str, Any] | None = None,
     ) -> dict:
         """
         Intercept a tool call that requires confirmation.
@@ -817,7 +1027,7 @@ class SpineProxy:
         )
 
         # Format arguments for display
-        args_display = json.dumps(arguments, indent=2)
+        args_display = json.dumps(display_arguments or arguments, indent=2)
 
         return make_response(msg_id, {
             "content": [
@@ -874,6 +1084,15 @@ class SpineProxy:
         ):
             result = await server.send_request(
                 "tools/call", pending["original_message"].get("params")
+            )
+
+        if self.config.security.scrub_secrets_in_responses:
+            result = self._scrub_response(result)
+
+        if server.config.scramble_pii_in_responses:
+            result = self._scramble_pii_response(
+                result,
+                use_nlp=server.config.scramble_pii_use_nlp,
             )
 
         response_result = result.get("result", result)
@@ -942,6 +1161,75 @@ class SpineProxy:
         return make_response(msg_id, {
             "content": [{"type": "text", "text": text}],
         })
+
+    def _inject_banner(self, payload: Any, banner: str) -> Any:
+        """
+        Prepend ``banner`` to the text content of a tool response.
+
+        If the response already contains a ``content`` list of MCP
+        content blocks, we insert a text block at the front. Otherwise
+        we wrap the payload in a ``content`` list.
+        """
+        if isinstance(payload, dict):
+            content = payload.get("content")
+            if isinstance(content, list):
+                new_content = [
+                    {"type": "text", "text": banner}
+                ] + content
+                return {**payload, "content": new_content}
+            # No content list — attach one alongside existing fields.
+            return {
+                **payload,
+                "content": [{"type": "text", "text": banner}],
+            }
+        # Non-dict payload — wrap it.
+        return {
+            "content": [
+                {"type": "text", "text": banner},
+                {"type": "text", "text": str(payload)},
+            ]
+        }
+
+    def _handle_budget(
+        self, msg_id: int | str, arguments: dict[str, Any]
+    ) -> dict:
+        """Handle the spine_budget meta-tool: return today's usage stats."""
+        stats = self._budget.stats()
+        if stats["daily_limit"] <= 0:
+            text = (
+                "Token budget is not configured (daily_limit = 0).\n"
+                f"Tokens recorded today: {stats['tokens_used']}."
+            )
+        else:
+            text = (
+                f"Token budget status for {stats['date']}:\n"
+                f"  Used:       {stats['tokens_used']} tokens\n"
+                f"  Limit:      {stats['daily_limit']} tokens\n"
+                f"  Remaining:  {stats['tokens_remaining']} tokens\n"
+                f"  Usage:      {stats['usage_pct'] * 100:.1f}%\n"
+                f"  Warn at:    {int(stats['warn_at'] * 100)}%\n"
+                f"  Action:     {stats['action']}\n"
+                f"  Over budget: {stats['over_budget']}"
+            )
+        return make_response(msg_id, {
+            "content": [{"type": "text", "text": text}],
+            "stats": stats,
+        })
+
+    def _get_budget_meta_tool(self) -> dict[str, Any]:
+        """Return the spine_budget meta-tool definition."""
+        return {
+            "name": "spine_budget",
+            "description": (
+                "Check the current token budget status for today. "
+                "Returns tokens used, remaining, and the configured "
+                "daily limit."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        }
 
     def _get_recall_meta_tool(self) -> dict[str, Any]:
         """Return the spine_recall meta-tool definition."""

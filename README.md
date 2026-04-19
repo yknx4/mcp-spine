@@ -16,6 +16,12 @@ LLM agents using MCP tools face three problems:
 
 MCP Spine solves all three.
 
+## Demo
+
+![MCP Spine Doctor](docs/demo.gif)
+
+*Runs on Windows, macOS, and Linux. CI tested across all three.*
+
 ## Install
 
 ```bash
@@ -28,8 +34,11 @@ pip install mcp-spine[ml]
 ## Quick Start
 
 ```bash
-# Generate config
+# Interactive setup wizard
 mcp-spine init
+
+# Or quick default config
+mcp-spine init --quick
 
 # Diagnose your setup
 mcp-spine doctor --config spine.toml
@@ -105,6 +114,22 @@ The `-u` flag ensures unbuffered stdout, preventing pipe hangs on Windows.
 - `spine_recall` meta-tool to query cached results
 - Prevents context loss when semantic router swaps tools between turns
 
+### Token Budget
+- Daily token consumption tracking across all tool calls
+- Configurable daily limit with warn/block actions
+- Persistent SQLite storage (survives restarts within the same day)
+- Automatic midnight rollover
+- `spine_budget` meta-tool to check usage mid-conversation
+- Token estimation via character-count heuristic (~4 chars/token)
+- Non-blocking: budget failures never crash the proxy
+
+### Config Hot-Reload
+- Edit `spine.toml` while Spine is running — changes apply in seconds
+- Hot-reloadable: minifier level, rate limits, security policies, token budget, state guard patterns
+- Non-reloadable (requires restart): server list, commands, audit DB path
+- SHA-256 polling with 2-second interval
+- All reloads logged to the audit trail
+
 ### SSE Transport
 - Connect to remote MCP servers over HTTP/SSE alongside local stdio servers
 - No external dependencies (uses stdlib urllib)
@@ -119,7 +144,7 @@ mcp-spine doctor --config spine.toml
 # Live monitoring dashboard
 mcp-spine dashboard
 
-# Usage analytics
+# Usage analytics (includes token budget)
 mcp-spine analytics --hours 24
 
 # Query audit log
@@ -186,6 +211,12 @@ rerank = true
 # Schema minification — 61% token savings at level 2
 [minifier]
 level = 2
+
+# Token budget — track and limit daily token spend
+[token_budget]
+daily_limit = 500000    # tokens per day (0 = unlimited)
+warn_at = 0.8           # warn at 80% usage
+action = "warn"         # "warn" = log warning, "block" = reject tool calls
 
 # State guard — prevent context rot
 [state_guard]
@@ -257,6 +288,7 @@ Defense-in-depth — every layer assumes the others might fail.
 | Tool abuse | Policy-based blocking, audit logging, HITL confirmation |
 | Log tampering | HMAC fingerprints on every audit entry |
 | Destructive operations | `require_confirmation` pauses for user approval |
+| Runaway token spend | Daily budget limits with warn/block enforcement |
 
 ## Architecture
 
@@ -274,6 +306,7 @@ Client ◄──stdio──► MCP Spine ◄──stdio──► Filesystem Serv
                    │Guard  │  ← File state pinning (SHA-256)
                    │HITL   │  ← Human-in-the-loop confirmation
                    │Memory │  ← Tool output cache
+                   │Budget │  ← Daily token tracking + limits
                    └───────┘
 ```
 
@@ -313,6 +346,7 @@ mcp-spine/
 │   ├── minifier.py         # Schema pruning (4 aggression levels)
 │   ├── state_guard.py      # File watcher + SHA-256 manifest + pin injection
 │   ├── memory.py           # Tool output cache (ring buffer + dedup + TTL)
+│   ├── budget.py           # Token budget tracker (daily limits + persistence)
 │   ├── dashboard.py        # Live TUI dashboard (Rich)
 │   ├── sse_client.py       # SSE transport client for remote servers
 │   └── security/
@@ -330,7 +364,8 @@ mcp-spine/
 │   ├── test_minifier.py    # Schema minification tests
 │   ├── test_state_guard.py # State guard tests
 │   ├── test_proxy_features.py  # HITL, dashboard, analytics tests
-│   └── test_memory.py      # Tool output memory tests
+│   ├── test_memory.py      # Tool output memory tests
+│   └── test_budget.py      # Token budget tracker tests
 ├── configs/
 │   └── example.spine.toml  # Complete reference config
 └── .github/
@@ -344,7 +379,7 @@ mcp-spine/
 pytest tests/ -v
 ```
 
-135+ tests covering security, config validation, schema minification, state guard, HITL policies, dashboard queries, analytics, tool memory, and Windows path edge cases.
+140+ tests covering security, config validation, schema minification, state guard, HITL policies, dashboard queries, analytics, tool memory, token budget tracking, and Windows path edge cases.
 
 CI runs on every push: Windows + Linux, Python 3.11/3.12/3.13.
 

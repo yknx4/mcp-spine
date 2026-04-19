@@ -116,10 +116,10 @@ class TestStatePin:
         guard.update_file(str(f))
 
         pin = guard.generate_pin()
-        assert "SPINE STATE GUARD" in pin
+        assert "spine-state" in pin
         assert "sha:" in pin
         assert "v1" in pin
-        assert "RULE:" in pin
+        assert "Re-read before editing" in pin
 
     def test_pin_ordered_by_recency(self, tmp_path):
         guard = StateGuard(watch_paths=[str(tmp_path)])
@@ -168,7 +168,7 @@ class TestPinInjection:
         injected = guard.inject_pin_into_response(response)
         content = injected["result"]["content"]
         assert len(content) == 2  # original + pin
-        assert "SPINE STATE GUARD" in content[1]["text"]
+        assert "spine-state" in content[1]["text"]
 
     def test_no_injection_on_empty_manifest(self):
         guard = StateGuard()

@@ -221,7 +221,7 @@ class StateGuard:
         )[:self.max_pin_files]
 
         lines = [
-            "[SPINE STATE GUARD — Source of Truth]",
+            "[spine-state v" + str(self._version_counter) + "]",
             f"Snapshot: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"Tracked: {len(self.manifest)} files",
             "---",
@@ -248,10 +248,8 @@ class StateGuard:
 
         lines.extend([
             "---",
-            "RULE: If you have a cached version of any file above, "
-            "discard it. These hashes are authoritative. "
-            "Re-read any file before editing if your cached hash "
-            "does not match.",
+            "Note: file hashes above reflect the latest disk state. "
+            "Re-read before editing if your cached version differs.",
         ])
 
         return "\n".join(lines)
