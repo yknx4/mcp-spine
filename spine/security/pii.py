@@ -287,6 +287,39 @@ _SENSITIVE_FREE_TEXT_KEYS = {
     "customized_filters",
 }
 
+_SAFE_STRUCTURED_KEYS = {
+    "column_name",
+    "data_type",
+    "id",
+    "object_name",
+    "object_type",
+    "schema",
+    "schema_name",
+    "table_name",
+    "type",
+}
+
+_SAFE_STRUCTURED_VALUES = {
+    "bigint",
+    "boolean",
+    "character varying",
+    "date",
+    "double precision",
+    "false",
+    "integer",
+    "json",
+    "jsonb",
+    "numeric",
+    "profiles",
+    "public",
+    "table",
+    "text",
+    "timestamp without time zone",
+    "true",
+    "users",
+    "uuid",
+}
+
 _STRUCTURED_CONTEXT_KEYS = tuple(
     sorted(
         {
@@ -360,6 +393,13 @@ def _entity_for_context_key(key: str) -> str | None:
         return "ID"
     if normalized in _SENSITIVE_ID_KEYS or normalized in _SENSITIVE_FREE_TEXT_KEYS:
         return "ID"
+    if (
+        normalized in _SAFE_STRUCTURED_KEYS
+        or normalized.endswith("_id")
+        or normalized.endswith("_ids")
+        or normalized.endswith("_count")
+    ):
+        return None
     if normalized in {"first_name", "last_name"}:
         return "PERSON"
     if normalized == "age":
@@ -393,12 +433,43 @@ def _entity_for_context_key(key: str) -> str | None:
     return None
 
 
+def _entity_for_structured_value(label: str, value: str) -> str | None:
+    entity_type = _entity_for_context_key(label)
+    if entity_type:
+        return entity_type
+
+    stripped = value.strip()
+    if not stripped:
+        return None
+
+    normalized_value = stripped.lower()
+    if normalized_value in _SAFE_STRUCTURED_VALUES:
+        return None
+
+    normalized_label = label.lower()
+    if (
+        normalized_label in _SAFE_STRUCTURED_KEYS
+        or normalized_label.endswith("_id")
+        or normalized_label.endswith("_ids")
+        or normalized_label.endswith("_count")
+    ):
+        return None
+
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", stripped):
+        return "ID"
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ T][^,\]}]+)?", stripped):
+        return "DATE_TIME"
+    return "ID"
+
+
 def _context_entity_types() -> set[str]:
-    return {
+    entity_types = {
         entity_type
         for key in _STRUCTURED_CONTEXT_KEYS
         if (entity_type := _entity_for_context_key(key))
     }
+    entity_types.add("ID")
+    return entity_types
 
 
 def _structured_pii_spans(text: str) -> list[_StructuredPiiSpan]:
@@ -413,12 +484,12 @@ def _structured_pii_spans(text: str) -> list[_StructuredPiiSpan]:
     or app-specific identifiers. This pass only supplies field-name context;
     replacement still goes through Presidio's anonymizer operators.
     """
-    key_pattern = r"(?:" + "|".join(re.escape(key) for key in _STRUCTURED_CONTEXT_KEYS) + r")"
+    key_pattern = r"[A-Za-z_][A-Za-z0-9_]*"
     spans: list[_StructuredPiiSpan] = []
 
     def add_span(match: re.Match) -> None:
-        entity_type = _entity_for_context_key(match.group("label"))
         value = match.group("value")
+        entity_type = _entity_for_structured_value(match.group("label"), value)
         if entity_type and value.strip():
             start, end = match.span("value")
             spans.append(_StructuredPiiSpan(start, end, entity_type))

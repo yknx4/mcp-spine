@@ -200,6 +200,110 @@ class TestDuplicateToolNames:
         }
         assert pool.route_tool("beanstack_production_execute_sql").name == "beanstack-production"
         assert pool.route_tool("beanstack_readonly_execute_sql").name == "beanstack-readonly"
+        assert pool.route_tool("execute_sql") is None
+        assert pool.ambiguous_tool_options("execute_sql") == [
+            "beanstack_production_execute_sql",
+            "beanstack_readonly_execute_sql",
+        ]
+
+    def test_duplicate_original_names_do_not_get_unprefixed_alias(self):
+        class FakeServer:
+            def __init__(self, name):
+                self.name = name
+                self.config = ServerConfig(name=name, command="python")
+                self._tools = [
+                    {
+                        "name": "list_schemas",
+                        "_spine_original_name": "list_schemas",
+                        "_spine_server": name,
+                    }
+                ]
+                self._tool_names = set()
+                self._public_to_original_tool = {}
+
+            @property
+            def is_available(self):
+                return True
+
+        pool = ServerPool([], logger=None)
+        pool._servers = {
+            "primary-a": FakeServer("primary-a"),
+            "primary-b": FakeServer("primary-b"),
+        }
+
+        pool._rebuild_tool_index()
+
+        assert pool.route_tool("list_schemas") is None
+        assert pool.ambiguous_tool_options("list_schemas") == [
+            "primary_a_list_schemas",
+            "primary_b_list_schemas",
+        ]
+
+    def test_duplicate_normalized_server_prefixes_stay_unique(self):
+        class FakeServer:
+            def __init__(self, name):
+                self.name = name
+                self._tools = [
+                    {
+                        "name": "execute_sql",
+                        "_spine_original_name": "execute_sql",
+                        "_spine_server": name,
+                    }
+                ]
+                self._tool_names = set()
+                self._public_to_original_tool = {}
+
+            @property
+            def is_available(self):
+                return True
+
+        pool = ServerPool([], logger=None)
+        pool._servers = {
+            "db-prod": FakeServer("db-prod"),
+            "db_prod": FakeServer("db_prod"),
+        }
+
+        pool._rebuild_tool_index()
+
+        tools = {tool["name"] for tool in pool.all_tools()}
+        assert len(tools) == 2
+        assert all(tool.startswith("db_prod_") for tool in tools)
+        assert all(tool.endswith("_execute_sql") for tool in tools)
+        assert pool.route_tool("execute_sql") is None
+        assert pool.ambiguous_tool_options("execute_sql") == sorted(tools)
+
+    def test_duplicate_tool_names_scale_across_many_servers(self):
+        class FakeServer:
+            def __init__(self, name):
+                self.name = name
+                self._tools = [
+                    {
+                        "name": "execute_sql",
+                        "_spine_original_name": "execute_sql",
+                        "_spine_server": name,
+                    }
+                ]
+                self._tool_names = set()
+                self._public_to_original_tool = {}
+
+            @property
+            def is_available(self):
+                return True
+
+        pool = ServerPool([], logger=None)
+        pool._servers = {
+            f"database-{index}": FakeServer(f"database-{index}")
+            for index in range(100)
+        }
+
+        pool._rebuild_tool_index()
+
+        tools = {tool["name"] for tool in pool.all_tools()}
+        assert len(tools) == 100
+        assert pool.route_tool("execute_sql") is None
+        assert len(pool.ambiguous_tool_options("execute_sql")) == 100
+        for tool_name in tools:
+            assert pool.route_tool(tool_name) is not None
 
     @pytest.mark.asyncio
     async def test_namespaced_tool_call_uses_original_backend_name(self):
