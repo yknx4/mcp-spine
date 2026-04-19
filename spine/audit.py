@@ -90,7 +90,23 @@ class AuditLogger:
         self._db_path = db_path
         self._db: sqlite3.Connection | None = None
         self._db_lock = threading.Lock()
+        self._session_id: str | None = None
         self._init_db()
+
+    def set_session(self, session_id: str, client_name: str = "", client_version: str = "") -> None:
+        """Set the current client session ID. Called on initialize handshake."""
+        self._session_id = session_id
+        self.info(
+            EventType.STARTUP,
+            component="session",
+            session_id=session_id,
+            client_name=client_name,
+            client_version=client_version,
+        )
+
+    @property
+    def session_id(self) -> str | None:
+        return self._session_id
 
     def _init_db(self) -> None:
         """Initialize SQLite audit database."""
@@ -107,6 +123,11 @@ class AuditLogger:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Add session_id column if not present (migration for existing DBs)
+        try:
+            self._db.execute("ALTER TABLE audit_log ADD COLUMN session_id TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         self._db.execute("""
             CREATE INDEX IF NOT EXISTS idx_audit_event_type
             ON audit_log(event_type)
@@ -118,6 +139,10 @@ class AuditLogger:
         self._db.execute("""
             CREATE INDEX IF NOT EXISTS idx_audit_tool
             ON audit_log(tool_name)
+        """)
+        self._db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_audit_session
+            ON audit_log(session_id)
         """)
         self._db.commit()
 
@@ -185,9 +210,9 @@ class AuditLogger:
                 try:
                     self._db.execute(
                         """INSERT INTO audit_log
-                           (timestamp, event_type, tool_name, server_name, details, fingerprint)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
-                        (ts, event_type.value, tool_name, server_name, details_json, fp),
+                           (timestamp, event_type, tool_name, server_name, details, fingerprint, session_id)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (ts, event_type.value, tool_name, server_name, details_json, fp, self._session_id),
                     )
                     self._db.commit()
                 except sqlite3.Error as e:

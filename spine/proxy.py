@@ -538,6 +538,17 @@ class SpineProxy:
         self, msg_id: int | str, message: dict
     ) -> dict:
         """Handle MCP initialize handshake."""
+        import secrets
+
+        # Extract client info and generate session ID
+        params = message.get("params", {})
+        client_info = params.get("clientInfo", {})
+        client_name = client_info.get("name", "unknown")
+        client_version = client_info.get("version", "")
+
+        session_id = secrets.token_hex(12)
+        self.logger.set_session(session_id, client_name, client_version)
+
         return make_response(msg_id, {
             "protocolVersion": "2024-11-05",
             "capabilities": {
@@ -546,7 +557,7 @@ class SpineProxy:
             },
             "serverInfo": {
                 "name": "mcp-spine",
-                "version": "0.1.0",
+                "version": "0.2.3",
             },
         })
 
