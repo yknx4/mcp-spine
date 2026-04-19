@@ -10,6 +10,8 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from spine.config import ServerConfig, SpineConfig, StateGuardConfig
@@ -326,6 +328,187 @@ class TestDuplicateToolNames:
         assert len(pool.ambiguous_tool_options("execute_sql")) == 100
         for tool_name in tools:
             assert pool.route_tool(tool_name) is not None
+
+    def test_multiple_servers_prefix_unique_tool_names(self):
+        class FakeServer:
+            def __init__(self, name, tool_name):
+                self.name = name
+                self._tools = [
+                    {
+                        "name": tool_name,
+                        "_spine_original_name": tool_name,
+                        "_spine_server": name,
+                    }
+                ]
+                self._tool_names = set()
+                self._public_to_original_tool = {}
+
+            @property
+            def is_available(self):
+                return True
+
+        pool = ServerPool([], logger=None)
+        pool._servers = {
+            "analytics-primary": FakeServer("analytics-primary", "execute_sql"),
+            "metrics-primary": FakeServer("metrics-primary", "get_top_queries"),
+        }
+
+        pool._rebuild_tool_index()
+
+        tools = {tool["name"] for tool in pool.all_tools()}
+        assert tools == {
+            "analytics_primary_execute_sql",
+            "metrics_primary_get_top_queries",
+        }
+        assert pool.route_tool("execute_sql") is None
+        assert pool.ambiguous_tool_options("execute_sql") == [
+            "analytics_primary_execute_sql",
+        ]
+        assert pool.route_tool("get_top_queries") is None
+        assert pool.ambiguous_tool_options("get_top_queries") == [
+            "metrics_primary_get_top_queries",
+        ]
+
+    def test_partial_multi_server_tool_list_is_prefixed_before_all_servers_ready(self):
+        class FakeServer:
+            def __init__(self, name, available):
+                self.name = name
+                self._available = available
+                self._tools = [
+                    {
+                        "name": "execute_sql",
+                        "_spine_original_name": "execute_sql",
+                        "_spine_server": name,
+                    }
+                ]
+                self._tool_names = set()
+                self._public_to_original_tool = {}
+
+            @property
+            def is_available(self):
+                return self._available
+
+        pool = ServerPool([], logger=None)
+        pool._servers = {
+            "database-0": FakeServer("database-0", True),
+            "database-1": FakeServer("database-1", False),
+        }
+
+        pool._rebuild_tool_index()
+
+        tools = {tool["name"] for tool in pool.all_tools()}
+        assert tools == {"database_0_execute_sql"}
+        assert pool.route_tool("execute_sql") is None
+        assert pool.ambiguous_tool_options("execute_sql") == [
+            "database_0_execute_sql",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_startup_rebuilds_public_names_as_each_server_connects(self):
+        fast_listed = asyncio.Event()
+        release_slow = asyncio.Event()
+
+        class FakeServer:
+            def __init__(self, name, release_event=None):
+                self.name = name
+                self._release_event = release_event
+                self._available = False
+                self._tools = []
+                self._tool_names = set()
+                self._public_to_original_tool = {}
+
+            @property
+            def is_available(self):
+                return self._available
+
+            async def start(self):
+                return None
+
+            async def initialize(self):
+                return None
+
+            async def list_tools(self):
+                if self._release_event:
+                    await self._release_event.wait()
+                self._tools = [
+                    {
+                        "name": "get_top_queries",
+                        "_spine_original_name": "get_top_queries",
+                        "_spine_server": self.name,
+                    }
+                ]
+                self._available = True
+                if self.name == "database-0":
+                    fast_listed.set()
+                return self._tools
+
+        pool = ServerPool([], logger=None)
+        pool._servers = {
+            "database-0": FakeServer("database-0"),
+            "database-1": FakeServer("database-1", release_slow),
+        }
+
+        start_task = asyncio.create_task(pool.start_all())
+        await fast_listed.wait()
+        await asyncio.sleep(0)
+
+        tools = {tool["name"] for tool in pool.all_tools()}
+        assert tools == {"database_0_get_top_queries"}
+        assert pool.route_tool("get_top_queries") is None
+
+        release_slow.set()
+        await start_task
+
+    @pytest.mark.asyncio
+    async def test_tools_list_returns_prefixed_names_for_multi_server_pool(self, tmp_path):
+        class FakeServer:
+            def __init__(self, name):
+                self.name = name
+                self._tools = [
+                    {
+                        "name": "get_top_queries",
+                        "_spine_original_name": "get_top_queries",
+                        "_spine_server": name,
+                        "description": "Get top queries",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    }
+                ]
+                self._tool_names = set()
+                self._public_to_original_tool = {}
+
+            @property
+            def is_available(self):
+                return True
+
+        proxy = SpineProxy(
+            SpineConfig(
+                audit_db=str(tmp_path / "audit.db"),
+                state_guard=StateGuardConfig(enabled=False),
+            )
+        )
+        proxy._ready = True
+        proxy._router = None
+        proxy._minifier = None
+
+        pool = ServerPool([], logger=None)
+        pool._servers = {
+            "beanstack-production": FakeServer("beanstack-production"),
+            "beanstack-readonly": FakeServer("beanstack-readonly"),
+        }
+        pool._rebuild_tool_index()
+        proxy.pool = pool
+
+        response = await proxy._handle_tools_list(1, {"params": {}})
+
+        tool_names = {
+            tool["name"]
+            for tool in response["result"]["tools"]
+        }
+        assert "get_top_queries" not in tool_names
+        assert {
+            "beanstack_production_get_top_queries",
+            "beanstack_readonly_get_top_queries",
+        } <= tool_names
 
     @pytest.mark.asyncio
     async def test_namespaced_tool_call_uses_original_backend_name(self):

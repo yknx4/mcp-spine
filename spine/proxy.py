@@ -716,6 +716,15 @@ class SpineProxy:
         if server is None:
             options = self.pool.ambiguous_tool_options(tool_name)
             if options:
+                if len(options) == 1:
+                    return make_error(
+                        msg_id,
+                        TOOL_NOT_FOUND,
+                        (
+                            f"Tool '{tool_name}' is scoped to a server. "
+                            f"Use: {options[0]}"
+                        ),
+                    )
                 return make_error(
                     msg_id,
                     TOOL_NOT_FOUND,

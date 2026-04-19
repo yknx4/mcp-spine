@@ -255,6 +255,30 @@ class TestPIIScrambling:
         assert "SELECT * FROM profiles WHERE profile_id = $1" in scrambled
 
     @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_top_query_rows_preserve_large_metrics_and_sql_syntax(self, monkeypatch):
+        monkeypatch.setattr(pii_module, "_fake_value", lambda entity, value: f"[{entity}]")
+        text = (
+            "[{'query': 'SELECT file_name, lpad(file_offset::text, $1, $2) "
+            "AS file_offset FROM pg_walfile_name_offset(pg_backup_start($3))', "
+            "'calls': 83, 'total_exec_time': 3635294175, "
+            "'mean_exec_time': 4238993789, 'rows': 83}, "
+            "{'query': 'SELECT books.* FROM books WHERE books.state = $1 "
+            "AND similarity(title, $2) > $3', 'calls': 2, "
+            "'total_exec_time': 1925852, 'mean_exec_time': 962926, 'rows': 12}]"
+        )
+
+        scrambled = pii_module._scramble_structured_text(text)
+
+        assert "file_offset::text" in scrambled
+        assert "books.state = $1" in scrambled
+        assert "'total_exec_time': 3635294175" in scrambled
+        assert "'mean_exec_time': 4238993789" in scrambled
+        assert "'mean_exec_time': 962926" in scrambled
+        assert "[PHONE_NUMBER]" not in scrambled
+        assert "[IP_ADDRESS]" not in scrambled
+        assert "[URL]" not in scrambled
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
     def test_structured_database_rows_scramble_bare_values(self, monkeypatch):
         monkeypatch.setattr(pii_module, "_fake_value", lambda entity, value: f"[{entity}]")
         text = "[{'email': jane@example.com, 'parent_email_address': parent@example.com}]"

@@ -393,6 +393,7 @@ class ServerPool:
                 await server.start()
                 await server.initialize()
                 await server.list_tools()
+                self._rebuild_tool_index()
             except Exception as e:
                 self._logger.error(
                     EventType.SERVER_CONNECT,
@@ -426,6 +427,7 @@ class ServerPool:
         self._tool_to_server.clear()
         self._ambiguous_tool_options.clear()
         public_names_by_original: dict[str, list[str]] = {}
+        prefix_all_tools = len(self._servers) > 1
         for server in self._servers.values():
             if not server.is_available:
                 continue
@@ -434,9 +436,13 @@ class ServerPool:
             public_names: set[str] = set()
             for tool in server._tools:
                 original_name = tool.get("_spine_original_name", tool["name"])
+                needs_server_scope = (
+                    prefix_all_tools
+                    or name_counts[original_name] > 1
+                )
                 public_name = (
                     f"{server_prefixes[server.name]}_{original_name}"
-                    if name_counts[original_name] > 1
+                    if needs_server_scope
                     else original_name
                 )
                 tool["_spine_original_name"] = original_name
@@ -450,12 +456,13 @@ class ServerPool:
             server._public_to_original_tool = public_to_original
 
         for original_name, servers in tools_by_original.items():
-            if name_counts[original_name] <= 1:
+            public_options = sorted(public_names_by_original.get(original_name, []))
+            if not public_options:
                 continue
 
-            self._ambiguous_tool_options[original_name] = sorted(
-                public_names_by_original.get(original_name, [])
-            )
+            public_name_differs = public_options != [original_name]
+            if name_counts[original_name] > 1 or public_name_differs:
+                self._ambiguous_tool_options[original_name] = public_options
 
     @staticmethod
     def _tool_prefix(server_name: str) -> str:

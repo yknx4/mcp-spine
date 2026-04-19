@@ -140,6 +140,8 @@ def test_real_readonly_top_queries_do_not_hide_metrics_or_sql_shape():
             name for name in top_query_tools if "readonly" in name.lower()
         ]
         assert top_query_tools, "real Spine config has no get_top_queries tool"
+        if len(top_query_tools) > 1:
+            assert "get_top_queries" not in tool_names
 
         response = client.request(
             "tools/call",

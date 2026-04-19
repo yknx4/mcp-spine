@@ -461,11 +461,18 @@ def _entity_for_structured_value(label: str, value: str) -> str | None:
         ":" in stripped and re.fullmatch(r"[0-9A-Fa-f:.]+", stripped)
     ):
         return "IP_ADDRESS"
-    if re.fullmatch(
+    phone_match = re.fullmatch(
         r"\+?(?:\d[\s().-]*){7,}\d(?:\s*(?:x|ext\.?)\s*\d+)?",
         stripped,
         flags=re.IGNORECASE,
-    ):
+    )
+    plain_number = re.fullmatch(r"\d+(?:\.\d+)?", stripped)
+    has_phone_shape = (
+        stripped.startswith("+")
+        or re.search(r"\b(?:x|ext\.?)\s*\d+\b", stripped, flags=re.IGNORECASE)
+        or len(re.findall(r"[\s().-]", stripped)) >= 2
+    )
+    if phone_match and has_phone_shape and not plain_number:
         return "PHONE_NUMBER"
 
     return None
@@ -546,6 +553,40 @@ def _structured_pii_spans(text: str) -> list[_StructuredPiiSpan]:
     return spans
 
 
+def _should_use_structured_only(text: str) -> bool:
+    """
+    Avoid whole-text PII heuristics for serialized DB rows and SQL diagnostics.
+
+    Presidio's generic recognizers are useful for free-form prose, but they
+    produce false positives on SQL syntax and large timing/count values. The
+    structured pass already handles PII when field names or SQL predicates
+    provide useful context.
+    """
+    if re.search(
+        r"[\[{(]\s*['\"][A-Za-z_][A-Za-z0-9_]*['\"]\s*:",
+        text,
+        flags=re.DOTALL,
+    ):
+        return True
+    if re.search(r"\bcolumn_name\b", text, flags=re.IGNORECASE) and re.search(
+        r"\bvalue\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(
+        r"\b(select|update|insert|delete)\b",
+        text,
+        flags=re.IGNORECASE,
+    ) and re.search(
+        r"\b(from|where|join|set|values)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
 def _scramble_structured_text(text: str) -> str:
     """Compatibility helper for tests and callers that target the structured pass."""
     return _get_scrambler(use_nlp=False).scramble_text(text)
@@ -606,7 +647,7 @@ class _PresidioPiiScrambler:
             )
             for span in _structured_pii_spans(text)
         ]
-        if structured_results:
+        if structured_results or _should_use_structured_only(text):
             results = structured_results
         else:
             results = self.analyze(text)
