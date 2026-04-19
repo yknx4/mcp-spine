@@ -217,34 +217,40 @@ def temp_postgres(tmp_path: Path):
 
 
 def _seed_pii_table(psql: str, database_uri: str) -> tuple[list[str], list[str]]:
+    from faker import Faker
+
+    fake = Faker("en_US")
+    fake.seed_instance(8675309)
+
     pii_values = {
-        "email": "private.user@example.org",
-        "parent_email_address": "guardian@example.org",
-        "phone_number": "415-867-5309",
+        "email": fake.email(),
+        "parent_email_address": fake.email(),
+        "phone_number": fake.phone_number(),
         "current_sign_in_ip": "198.51.100.10",
         "last_sign_in_ip": "198.51.100.11",
-        "zipcode": "90210",
-        "library_card_number": "LC-12345",
-        "username": "reader-login",
-        "reset_password_token": "reset-token-abc",
-        "otp_secret": "otp-secret-plain",
-        "profile_birthdate": "2012-05-06",
-        "profile_phone_number": "212-555-0199",
-        "profile_zipcode": "10001",
-        "cultural_pass_number": "CP-98765",
+        "zipcode": fake.postcode(),
+        "library_card_number": fake.bothify(text="LC-########"),
+        "username": fake.user_name(),
+        "reset_password_token": fake.sha256(),
+        "otp_secret": fake.bothify(text="OTP-????????-########"),
+        "encrypted_pin": fake.bothify(text="pin-????????-########"),
+        "encrypted_otp_secret": fake.bothify(text="otp-????????-########"),
+        "school_student_id": str(fake.random_number(digits=7, fix_len=True)),
+        "user_first_name": fake.first_name(),
+        "user_last_name": fake.last_name(),
+        "profile_birthdate": str(fake.date_of_birth(minimum_age=8, maximum_age=17)),
+        "profile_first_name": fake.first_name(),
+        "profile_last_name": fake.last_name(),
+        "profile_phone_number": fake.phone_number(),
+        "profile_zipcode": fake.postcode(),
+        "cultural_pass_number": fake.bothify(text="CP-########"),
+        "profile_age": "12.75",
     }
     safe_values = {
         "user_id": "1",
         "profile_id": "10",
         "profile_user_id": "1",
-        "school_student_id": "12345",
-        "user_first_name": "Jane",
-        "user_last_name": "Reader",
-        "profile_first_name": "Sam",
-        "profile_last_name": "Booker",
         "role": "reader",
-        "encrypted_pin": "pin-secret-abc",
-        "encrypted_otp_secret": "otp-secret-encrypted",
     }
 
     sql = f"""
@@ -385,11 +391,11 @@ def _seed_pii_table(psql: str, database_uri: str) -> tuple[list[str], list[str]]
             {_sql_literal(pii_values["username"])},
             {_sql_literal(pii_values["parent_email_address"])},
             {_sql_literal(pii_values["reset_password_token"])},
-            {_sql_literal(safe_values["encrypted_pin"])},
-            {_sql_literal(safe_values["encrypted_otp_secret"])},
+            {_sql_literal(pii_values["encrypted_pin"])},
+            {_sql_literal(pii_values["encrypted_otp_secret"])},
             {_sql_literal(pii_values["otp_secret"])},
-            {_sql_literal(safe_values["user_first_name"])},
-            {_sql_literal(safe_values["user_last_name"])}
+            {_sql_literal(pii_values["user_first_name"])},
+            {_sql_literal(pii_values["user_last_name"])}
         );
         INSERT INTO profiles (
             id,
@@ -408,14 +414,14 @@ def _seed_pii_table(psql: str, database_uri: str) -> tuple[list[str], list[str]]
             {safe_values["profile_id"]},
             {safe_values["profile_user_id"]},
             {_sql_literal(pii_values["profile_birthdate"])},
-            {_sql_literal(safe_values["profile_first_name"])},
-            {_sql_literal(safe_values["profile_last_name"])},
+            {_sql_literal(pii_values["profile_first_name"])},
+            {_sql_literal(pii_values["profile_last_name"])},
             {_sql_literal(pii_values["library_card_number"])},
             {_sql_literal(pii_values["profile_zipcode"])},
             {_sql_literal(pii_values["cultural_pass_number"])},
             {_sql_literal(pii_values["profile_phone_number"])},
-            {safe_values["school_student_id"]},
-            10
+            {pii_values["school_student_id"]},
+            {pii_values["profile_age"]}
         );
     """
     _run([psql, database_uri, "-v", "ON_ERROR_STOP=1", "-c", sql])
