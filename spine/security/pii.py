@@ -17,7 +17,7 @@ import hashlib
 import os
 import re
 import tempfile
-from typing import Any, Iterable
+from typing import Any, Iterable, NamedTuple
 
 os.environ.setdefault(
     "TLDEXTRACT_CACHE",
@@ -268,11 +268,18 @@ def _build_anonymizer_operators(entity_types: Iterable[str]) -> dict[str, Any]:
 
 
 _SENSITIVE_ID_KEYS = {
+    "encrypted_otp_secret",
+    "encrypted_otp_secret_iv",
+    "encrypted_otp_secret_salt",
+    "encrypted_password",
+    "encrypted_pin",
     "library_card_number",
     "cultural_pass_number",
     "reset_password_token",
+    "school_student_id",
     "otp_secret",
     "tokens",
+    "uid",
 }
 
 _SENSITIVE_FREE_TEXT_KEYS = {
@@ -284,6 +291,7 @@ _STRUCTURED_CONTEXT_KEYS = tuple(
     sorted(
         {
             "address",
+            "age",
             "birth",
             "birthdate",
             "card_number",
@@ -298,11 +306,18 @@ _STRUCTURED_CONTEXT_KEYS = tuple(
             "dob",
             "email",
             "email_address",
+            "encrypted_otp_secret",
+            "encrypted_otp_secret_iv",
+            "encrypted_otp_secret_salt",
+            "encrypted_password",
+            "encrypted_pin",
             "fax",
+            "first_name",
             "homepage_url",
             "iban",
             "ip_address",
             "last_sign_in_ip",
+            "last_name",
             "library_card_number",
             "login",
             "mac_address",
@@ -316,11 +331,13 @@ _STRUCTURED_CONTEXT_KEYS = tuple(
             "postcode",
             "province",
             "reset_password_token",
+            "school_student_id",
             "social_security",
             "social_security_number",
             "ssn",
             "state",
             "tokens",
+            "uid",
             "username",
             "zip",
             "zipcode",
@@ -331,12 +348,22 @@ _STRUCTURED_CONTEXT_KEYS = tuple(
 )
 
 
+class _StructuredPiiSpan(NamedTuple):
+    start: int
+    end: int
+    entity_type: str
+
+
 def _entity_for_context_key(key: str) -> str | None:
     normalized = key.lower()
     if normalized in {"login", "username"}:
         return "ID"
     if normalized in _SENSITIVE_ID_KEYS or normalized in _SENSITIVE_FREE_TEXT_KEYS:
         return "ID"
+    if normalized in {"first_name", "last_name"}:
+        return "PERSON"
+    if normalized == "age":
+        return "AGE"
     if "email" in normalized:
         return "EMAIL_ADDRESS"
     if "phone" in normalized or "mobile" in normalized or "fax" in normalized:
@@ -366,26 +393,35 @@ def _entity_for_context_key(key: str) -> str | None:
     return None
 
 
-def _replace_keyed_value(label: str, value: str) -> str:
-    entity_type = _entity_for_context_key(label)
-    if not entity_type or not value.strip():
-        return value
-    return _fake_value(entity_type, value)
+def _context_entity_types() -> set[str]:
+    return {
+        entity_type
+        for key in _STRUCTURED_CONTEXT_KEYS
+        if (entity_type := _entity_for_context_key(key))
+    }
 
 
-def _scramble_structured_text(text: str) -> str:
+def _structured_pii_spans(text: str) -> list[_StructuredPiiSpan]:
     """
-    Scramble values in common serialized row formats before NLP runs.
+    Locate PII-like values in common serialized database row formats.
 
-    Database MCP servers often return rows as text like:
+    Database MCP servers often return rows as plain text like:
       {'column_name': 'last_name', 'value': 'Smith'}
       {'email': 'jane@example.com', 'zipcode': '90210'}
 
     Presidio sees that as one free-form sentence and can miss short ZIP codes
-    or app-specific identifiers. This pass keeps the output shape intact but
-    uses nearby field names as context for replacement.
+    or app-specific identifiers. This pass only supplies field-name context;
+    replacement still goes through Presidio's anonymizer operators.
     """
     key_pattern = r"(?:" + "|".join(re.escape(key) for key in _STRUCTURED_CONTEXT_KEYS) + r")"
+    spans: list[_StructuredPiiSpan] = []
+
+    def add_span(match: re.Match) -> None:
+        entity_type = _entity_for_context_key(match.group("label"))
+        value = match.group("value")
+        if entity_type and value.strip():
+            start, end = match.span("value")
+            spans.append(_StructuredPiiSpan(start, end, entity_type))
 
     column_value_pattern = re.compile(
         rf"(?P<prefix>['\"]column_name['\"]\s*:\s*['\"](?P<label>{key_pattern})['\"]"
@@ -393,14 +429,8 @@ def _scramble_structured_text(text: str) -> str:
         flags=re.IGNORECASE,
     )
 
-    def replace_column_value(match: re.Match) -> str:
-        return (
-            match.group("prefix")
-            + _replace_keyed_value(match.group("label"), match.group("value"))
-            + match.group("suffix")
-        )
-
-    text = column_value_pattern.sub(replace_column_value, text)
+    for match in column_value_pattern.finditer(text):
+        add_span(match)
 
     quoted_key_pattern = re.compile(
         rf"(?P<prefix>['\"](?P<label>{key_pattern})['\"]\s*:\s*(?:[bB])?['\"])"
@@ -408,30 +438,19 @@ def _scramble_structured_text(text: str) -> str:
         flags=re.IGNORECASE,
     )
 
-    def replace_direct_key(match: re.Match) -> str:
-        return (
-            match.group("prefix")
-            + _replace_keyed_value(match.group("label"), match.group("value"))
-            + match.group("suffix")
-        )
-
-    text = quoted_key_pattern.sub(replace_direct_key, text)
+    for match in quoted_key_pattern.finditer(text):
+        add_span(match)
 
     bare_key_pattern = re.compile(
         rf"(?P<prefix>['\"](?P<label>{key_pattern})['\"]\s*:\s*)"
+        r"(?!\s*[bB]?['\"])"
         r"(?P<value>[^,\]}]+)"
         r"(?P<suffix>(?=,\s*['\"]|[\]}]))",
         flags=re.IGNORECASE,
     )
 
-    def replace_bare_key(match: re.Match) -> str:
-        return (
-            match.group("prefix")
-            + _replace_keyed_value(match.group("label"), match.group("value").strip())
-            + match.group("suffix")
-        )
-
-    text = bare_key_pattern.sub(replace_bare_key, text)
+    for match in bare_key_pattern.finditer(text):
+        add_span(match)
 
     sql_literal_pattern = re.compile(
         r"(?P<prefix>(?:\b[a-z_][a-z0-9_]*\.)?\"?(?P<label>[a-z_][a-z0-9_]*)\"?"
@@ -441,14 +460,15 @@ def _scramble_structured_text(text: str) -> str:
         flags=re.IGNORECASE,
     )
 
-    def replace_sql_literal(match: re.Match) -> str:
-        return (
-            match.group("prefix")
-            + _replace_keyed_value(match.group("label"), match.group("value"))
-            + match.group("suffix")
-        )
+    for match in sql_literal_pattern.finditer(text):
+        add_span(match)
 
-    return sql_literal_pattern.sub(replace_sql_literal, text)
+    return spans
+
+
+def _scramble_structured_text(text: str) -> str:
+    """Compatibility helper for tests and callers that target the structured pass."""
+    return _get_scrambler(use_nlp=False).scramble_text(text)
 
 
 class _PresidioPiiScrambler:
@@ -460,7 +480,9 @@ class _PresidioPiiScrambler:
             for entity in self._analyzer.get_supported_entities(language="en")
             if entity != "PERSON"
         )
-        self._operators = _build_anonymizer_operators(self._entities)
+        self._operators = _build_anonymizer_operators(
+            sorted(set(self._entities) | _context_entity_types())
+        )
 
     def analyze(self, text: str) -> list[Any]:
         return self._analyzer.analyze(
@@ -471,18 +493,43 @@ class _PresidioPiiScrambler:
         )
 
     def scramble_text(self, text: str, context_key: str | None = None) -> str:
+        from presidio_analyzer import RecognizerResult
+
         if context_key:
+            entity_type = _entity_for_context_key(context_key)
+            if entity_type and text.strip():
+                return self._anonymizer.anonymize(
+                    text=text,
+                    analyzer_results=[
+                        RecognizerResult(
+                            entity_type=entity_type,
+                            start=0,
+                            end=len(text),
+                            score=1.0,
+                        )
+                    ],
+                    operators=self._operators,
+                ).text
+
             prefix = f"{context_key.replace('_', ' ')}: "
             scrambled = self.scramble_text(f"{prefix}{text}")
             if scrambled.startswith(prefix):
                 return scrambled[len(prefix):]
             return scrambled
 
-        original_text = text
-        text = _scramble_structured_text(text)
-        if text != original_text and ("{" in original_text and ":" in original_text):
-            return text
-        results = self.analyze(text)
+        structured_results = [
+            RecognizerResult(
+                entity_type=span.entity_type,
+                start=span.start,
+                end=span.end,
+                score=1.0,
+            )
+            for span in _structured_pii_spans(text)
+        ]
+        if structured_results:
+            results = structured_results
+        else:
+            results = self.analyze(text)
         if not results:
             return text
         return self._anonymizer.anonymize(

@@ -162,7 +162,8 @@ class TestPIIScrambling:
         assert "90210" not in scrambled
         assert "zipcode" in scrambled
 
-    def test_structured_database_rows_leave_names_and_ids_alone(self, monkeypatch):
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_structured_database_rows_scramble_names_but_leave_row_ids_alone(self, monkeypatch):
         monkeypatch.setattr(pii_module, "_fake_value", lambda entity, value: f"[{entity}]")
         text = (
             "[{'id': 1, 'user_id': 2, 'first_name': 'Jane', "
@@ -175,12 +176,13 @@ class TestPIIScrambling:
 
         assert "'id': 1" in scrambled
         assert "'user_id': 2" in scrambled
-        assert "'first_name': 'Jane'" in scrambled
-        assert "'last_name': 'Smith'" in scrambled
+        assert "'first_name': '[PERSON]'" in scrambled
+        assert "'last_name': '[PERSON]'" in scrambled
         assert "'name': 'users'" in scrambled
-        assert "'encrypted_pin': 'pin-secret-abc'" in scrambled
-        assert "'encrypted_otp_secret': 'otp-secret-encrypted'" in scrambled
+        assert "'encrypted_pin': '[ID]'" in scrambled
+        assert "'encrypted_otp_secret': '[ID]'" in scrambled
 
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
     def test_structured_database_rows_scramble_user_profile_contact_fields(self, monkeypatch):
         monkeypatch.setattr(pii_module, "_fake_value", lambda entity, value: f"[{entity}]")
         text = (
@@ -189,7 +191,7 @@ class TestPIIScrambling:
             "'library_card_number': b'LC-12345', 'cultural_pass_number': b'CP-98765', "
             "'birthdate': '2012-03-04', 'current_sign_in_ip': '198.51.100.10', "
             "'login': b'jane-reader', 'username': b'jreader', "
-            "'school_student_id': 12345, 'safe_code': 'BOOK-ALPHA'}]"
+            "'school_student_id': 12345, 'age': 10, 'safe_code': 'BOOK-ALPHA'}]"
         )
 
         scrambled = pii_module._scramble_structured_text(text)
@@ -205,12 +207,29 @@ class TestPIIScrambling:
             "198.51.100.10",
             "jane-reader",
             "jreader",
+            "12345",
         ):
             assert value not in scrambled
 
-        assert "'school_student_id': 12345" in scrambled
+        assert "'age': [AGE]" in scrambled
         assert "BOOK-ALPHA" in scrambled
 
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_serialized_database_column_rows_scramble_names(self, monkeypatch):
+        monkeypatch.setattr(pii_module, "_fake_value", lambda entity, value: f"[{entity}]")
+        text = (
+            "[{'column_name': 'first_name', 'value': 'Jane'}, "
+            "{'column_name': 'last_name', 'value': 'Reader'}, "
+            "{'column_name': 'name', 'value': 'users'}]"
+        )
+
+        scrambled = pii_module._scramble_structured_text(text)
+
+        assert "Jane" not in scrambled
+        assert "Reader" not in scrambled
+        assert "{'column_name': 'name', 'value': 'users'}" in scrambled
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
     def test_structured_database_rows_scramble_bare_values(self, monkeypatch):
         monkeypatch.setattr(pii_module, "_fake_value", lambda entity, value: f"[{entity}]")
         text = "[{'email': jane@example.com, 'parent_email_address': parent@example.com}]"
@@ -220,6 +239,7 @@ class TestPIIScrambling:
         assert "jane@example.com" not in scrambled
         assert "parent@example.com" not in scrambled
 
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
     def test_sql_input_scrambling_preserves_join_ids(self, monkeypatch):
         monkeypatch.setattr(pii_module, "_fake_value", lambda entity, value: f"[{entity}]")
         sql = (
