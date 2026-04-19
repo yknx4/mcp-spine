@@ -10,7 +10,11 @@ Covers:
 
 from __future__ import annotations
 
+import pytest
+
+from spine.config import ServerConfig
 from spine.security.policy import PolicyAction, SecurityPolicy, ToolPolicy
+from spine.transport import ServerConnection, ServerPool
 
 # ───────────────────────────────────────────────
 # Human-in-the-Loop Policy Tests
@@ -158,6 +162,76 @@ class TestProtocolMessages:
         from spine.protocol import make_response
         resp = make_response("abc-123", {"tools": []})
         assert resp["id"] == "abc-123"
+
+
+class TestDuplicateToolNames:
+    """Test duplicate backend tool names stay separately callable."""
+
+    def test_server_pool_namespaces_duplicate_tool_names(self):
+        class FakeServer:
+            def __init__(self, name):
+                self.name = name
+                self._tools = [
+                    {
+                        "name": "execute_sql",
+                        "_spine_original_name": "execute_sql",
+                        "_spine_server": name,
+                    }
+                ]
+                self._tool_names = set()
+                self._public_to_original_tool = {}
+
+            @property
+            def is_available(self):
+                return True
+
+        pool = ServerPool([], logger=None)
+        pool._servers = {
+            "beanstack-production": FakeServer("beanstack-production"),
+            "beanstack-readonly": FakeServer("beanstack-readonly"),
+        }
+
+        pool._rebuild_tool_index()
+
+        tools = {tool["name"] for tool in pool.all_tools()}
+        assert tools == {
+            "beanstack_production_execute_sql",
+            "beanstack_readonly_execute_sql",
+        }
+        assert pool.route_tool("beanstack_production_execute_sql").name == "beanstack-production"
+        assert pool.route_tool("beanstack_readonly_execute_sql").name == "beanstack-readonly"
+
+    @pytest.mark.asyncio
+    async def test_namespaced_tool_call_uses_original_backend_name(self):
+        connection = ServerConnection(
+            ServerConfig(name="beanstack-readonly", command="python"),
+            logger=None,
+        )
+        connection._public_to_original_tool = {
+            "beanstack_readonly_execute_sql": "execute_sql",
+        }
+
+        sent = {}
+
+        async def fake_send_request(method, params):
+            sent["method"] = method
+            sent["params"] = params
+            return {"result": {"content": []}}
+
+        connection.send_request = fake_send_request
+
+        await connection.call_tool(
+            "beanstack_readonly_execute_sql",
+            {"sql": "select 1"},
+        )
+
+        assert sent == {
+            "method": "tools/call",
+            "params": {
+                "name": "execute_sql",
+                "arguments": {"sql": "select 1"},
+            },
+        }
 
 
 # ───────────────────────────────────────────────

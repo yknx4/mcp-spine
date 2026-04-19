@@ -12,7 +12,9 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import re
 import time
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -82,6 +84,7 @@ class ServerConnection:
         )
         self._tools: list[dict[str, Any]] = []
         self._tool_names: set[str] = set()
+        self._public_to_original_tool: dict[str, str] = {}
         self._request_id: int = 0
         self._pending: dict[int, asyncio.Future] = {}
         self._reader_task: asyncio.Task | None = None
@@ -306,10 +309,12 @@ class ServerConnection:
 
         # Tag each tool with its source server
         for tool in tools:
+            tool["_spine_original_name"] = tool["name"]
             tool["_spine_server"] = self.name
 
         self._tools = tools
         self._tool_names = {t["name"] for t in tools}
+        self._public_to_original_tool = {t["name"]: t["name"] for t in tools}
 
         self._logger.info(
             EventType.TOOL_LIST,
@@ -325,8 +330,9 @@ class ServerConnection:
         arguments: dict[str, Any],
     ) -> dict[str, Any]:
         """Call a tool on this server."""
+        original_tool_name = self._public_to_original_tool.get(tool_name, tool_name)
         return await self.send_request("tools/call", {
-            "name": tool_name,
+            "name": original_tool_name,
             "arguments": arguments,
         })
 
@@ -384,9 +390,7 @@ class ServerPool:
             try:
                 await server.start()
                 await server.initialize()
-                tools = await server.list_tools()
-                for tool in tools:
-                    self._tool_to_server[tool["name"]] = name
+                await server.list_tools()
             except Exception as e:
                 self._logger.error(
                     EventType.SERVER_CONNECT,
@@ -399,6 +403,44 @@ class ServerPool:
             *[_start_one(name, server) for name, server in self._servers.items()],
             return_exceptions=True,
         )
+        self._rebuild_tool_index()
+
+    def _rebuild_tool_index(self) -> None:
+        """Assign public tool names and preserve originals for duplicate names."""
+        name_counts = Counter(
+            tool.get("_spine_original_name", tool["name"])
+            for server in self._servers.values()
+            if server.is_available
+            for tool in server._tools
+        )
+
+        self._tool_to_server.clear()
+        for server in self._servers.values():
+            if not server.is_available:
+                continue
+
+            public_to_original: dict[str, str] = {}
+            public_names: set[str] = set()
+            for tool in server._tools:
+                original_name = tool.get("_spine_original_name", tool["name"])
+                public_name = (
+                    f"{self._tool_prefix(server.name)}_{original_name}"
+                    if name_counts[original_name] > 1
+                    else original_name
+                )
+                tool["_spine_original_name"] = original_name
+                tool["name"] = public_name
+                public_to_original[public_name] = original_name
+                public_names.add(public_name)
+                self._tool_to_server[public_name] = server.name
+
+            server._tool_names = public_names
+            server._public_to_original_tool = public_to_original
+
+    @staticmethod
+    def _tool_prefix(server_name: str) -> str:
+        """Normalize server names into MCP-friendly duplicate tool prefixes."""
+        return re.sub(r"[^A-Za-z0-9_]+", "_", server_name).strip("_")
 
     def all_tools(self) -> list[dict[str, Any]]:
         """Return all tools from all available servers."""
@@ -423,15 +465,14 @@ class ServerPool:
         for server in self._servers.values():
             if server.is_available:
                 try:
-                    tools = await server.list_tools()
-                    for tool in tools:
-                        self._tool_to_server[tool["name"]] = server.name
+                    await server.list_tools()
                 except Exception as e:
                     self._logger.warn(
                         EventType.TOOL_LIST,
                         server_name=server.name,
                         error=str(e),
                     )
+        self._rebuild_tool_index()
         return self.all_tools()
 
     async def shutdown_all(self) -> None:
