@@ -22,6 +22,7 @@ import asyncio
 import json
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from spine.audit import AuditLogger, EventType, LogLevel
@@ -57,8 +58,9 @@ class SpineProxy:
     and writes responses to stdout.
     """
 
-    def __init__(self, config: SpineConfig):
+    def __init__(self, config: SpineConfig, config_path: str | None = None):
         self.config = config
+        self._config_path = config_path
         self.logger = AuditLogger(
             db_path=config.audit_db,
             level=LogLevel[config.log_level.upper()],
@@ -162,6 +164,13 @@ class SpineProxy:
                 EventType.STARTUP,
                 component="state_guard",
                 watch_paths=self.config.state_guard.watch_paths,
+            )
+
+        # Start config hot-reload watcher
+        if self._config_path:
+            asyncio.create_task(
+                self._watch_config(),
+                name="config-watcher",
             )
 
         # Enter main proxy loop
@@ -333,6 +342,120 @@ class SpineProxy:
                 message=f"Router init failed: {e}. Semantic routing disabled.",
             )
             self._router = None
+
+    async def _watch_config(self) -> None:
+        """Watch the config file for changes and hot-reload safe settings."""
+        import hashlib
+
+        config_path = Path(self._config_path)
+        if not config_path.exists():
+            return
+
+        last_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
+
+        while self._running:
+            await asyncio.sleep(2.0)  # Poll every 2 seconds
+            try:
+                if not config_path.exists():
+                    continue
+                current_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
+                if current_hash != last_hash:
+                    last_hash = current_hash
+                    self._hot_reload(config_path)
+            except (OSError, PermissionError):
+                continue
+
+    def _hot_reload(self, config_path: Path) -> None:
+        """
+        Reload config and apply safe changes without restarting servers.
+
+        Hot-reloadable (no restart needed):
+          - Minifier level
+          - Rate limits (global + per-tool)
+          - Security policies (tool allow/deny, path rules)
+          - Token budget settings
+          - State guard ignore patterns
+
+        NOT hot-reloadable (requires full restart):
+          - Server list (adding/removing servers)
+          - Server commands/args/env
+          - Audit DB path
+          - Routing model
+        """
+        from spine.config import load_config
+
+        try:
+            new_config = load_config(str(config_path))
+        except Exception as e:
+            self.logger.warn(
+                EventType.STARTUP,
+                component="config_reload",
+                message=f"Config reload failed: {e}",
+            )
+            return
+
+        changes = []
+
+        # Minifier level
+        if new_config.minifier.level != self.config.minifier.level:
+            self._minifier = SchemaMinifier(
+                level=new_config.minifier.level,
+                max_description_length=new_config.minifier.max_description_length,
+                preserve_required=new_config.minifier.preserve_required,
+            )
+            changes.append(f"minifier level {self.config.minifier.level} -> {new_config.minifier.level}")
+
+        # Rate limits
+        if (new_config.security.global_rate_limit != self.config.security.global_rate_limit
+                or new_config.security.per_tool_rate_limit != self.config.security.per_tool_rate_limit):
+            self.rate_limiter = RateLimiter(
+                default_max_calls=new_config.security.per_tool_rate_limit,
+                default_window=60.0,
+            )
+            changes.append(
+                f"rate limits: global={new_config.security.global_rate_limit}, "
+                f"per_tool={new_config.security.per_tool_rate_limit}"
+            )
+
+        # Security policies
+        if new_config.security.tool_policies != self.config.security.tool_policies:
+            changes.append("security policies updated")
+
+        # Token budget
+        tb_old = self.config.token_budget
+        tb_new = new_config.token_budget
+        if (tb_new.daily_limit != tb_old.daily_limit
+                or tb_new.warn_at != tb_old.warn_at
+                or tb_new.action != tb_old.action):
+            self._budget.daily_limit = tb_new.daily_limit
+            self._budget.warn_at = tb_new.warn_at
+            self._budget.action = tb_new.action
+            changes.append(
+                f"token budget: {tb_new.daily_limit}/day, "
+                f"warn={tb_new.warn_at}, action={tb_new.action}"
+            )
+
+        # State guard ignore patterns
+        if (self._state_guard
+                and new_config.state_guard.ignore_patterns != self.config.state_guard.ignore_patterns):
+            self._state_guard.ignore_patterns = new_config.state_guard.ignore_patterns
+            changes.append("state guard ignore patterns updated")
+
+        # Apply the new config
+        self.config = new_config
+
+        if changes:
+            self.logger.info(
+                EventType.STARTUP,
+                component="config_reload",
+                message=f"Config reloaded: {'; '.join(changes)}",
+            )
+        else:
+            self.logger.info(
+                EventType.STARTUP,
+                component="config_reload",
+                message="Config file changed but no actionable differences",
+            )
 
     async def _wait_for_ready(self, timeout: float = 120.0) -> None:
         """Wait for background initialization to complete."""
