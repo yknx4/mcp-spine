@@ -215,6 +215,31 @@ allowed_roots = ["/path/to/project"]
 denied_patterns = ["**/.env", "**/*.key", "**/*.pem"]
 ```
 
+## Importing multi-mcp Settings
+
+Use the converter when you already have a `multi-mcp` `mcp.json`.
+The default keeps `multi-mcp` between Spine and the original backend servers:
+
+```bash
+python scripts/translate_multi_mcp.py /path/to/multi-mcp/mcp.json \
+  --multi-mcp-dir /path/to/multi-mcp \
+  --output spine.toml
+```
+
+This produces:
+
+```text
+MCP client -> mcp-spine -> multi-mcp -> backend MCP servers
+```
+
+To fully migrate the individual backend servers into native Spine config instead:
+
+```bash
+python scripts/translate_multi_mcp.py /path/to/multi-mcp/mcp.json \
+  --mode direct \
+  --output spine.toml
+```
+
 ## Security Model
 
 Defense-in-depth — every layer assumes the others might fail.
