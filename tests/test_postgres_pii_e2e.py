@@ -30,6 +30,8 @@ pytestmark = pytest.mark.skipif(
     reason="set RUN_POSTGRES_MCP_E2E=1 to run postgres-mcp e2e test",
 )
 
+PII_E2E_CASE_COUNT = int(os.environ.get("PII_E2E_CASES", "10"))
+
 
 def _find_command(name: str) -> str | None:
     if found := shutil.which(name):
@@ -216,18 +218,18 @@ def temp_postgres(tmp_path: Path):
         shutil.rmtree(socket_dir, ignore_errors=True)
 
 
-def _seed_pii_table(psql: str, database_uri: str) -> tuple[list[str], list[str]]:
+def _pii_values_for_case(case_number: int) -> dict[str, str]:
     from faker import Faker
 
     fake = Faker("en_US")
-    fake.seed_instance(8675309)
+    fake.seed_instance(8675309 + case_number)
 
     pii_values = {
         "email": fake.email(),
         "parent_email_address": fake.email(),
         "phone_number": fake.phone_number(),
-        "current_sign_in_ip": "198.51.100.10",
-        "last_sign_in_ip": "198.51.100.11",
+        "current_sign_in_ip": f"198.51.100.{case_number + 10}",
+        "last_sign_in_ip": f"198.51.100.{case_number + 40}",
         "zipcode": fake.postcode(),
         "library_card_number": fake.bothify(text="LC-########"),
         "username": fake.user_name(),
@@ -244,16 +246,20 @@ def _seed_pii_table(psql: str, database_uri: str) -> tuple[list[str], list[str]]
         "profile_phone_number": fake.phone_number(),
         "profile_zipcode": fake.postcode(),
         "cultural_pass_number": fake.bothify(text="CP-########"),
-        "profile_age": "12.75",
+        "profile_age": str(fake.pydecimal(left_digits=2, right_digits=2, positive=True)),
     }
-    safe_values = {
-        "user_id": "1",
-        "profile_id": "10",
-        "profile_user_id": "1",
-        "role": "reader",
-    }
+    return pii_values
 
-    sql = f"""
+
+def _seed_pii_tables(
+    psql: str,
+    database_uri: str,
+    case_count: int,
+) -> list[tuple[str, str]]:
+    if case_count < 1:
+        raise ValueError("case_count must be at least 1")
+
+    sql = """
         DROP TABLE IF EXISTS users;
         DROP TABLE IF EXISTS profiles;
         CREATE TABLE users (
@@ -294,7 +300,7 @@ def _seed_pii_table(psql: str, database_uri: str) -> tuple[list[str], list[str]]
             military_sponsor_status character varying,
             provider character varying NOT NULL DEFAULT 'email',
             uid uuid,
-            tokens jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+            tokens jsonb NOT NULL DEFAULT '{}'::jsonb,
             mobile_app_user boolean DEFAULT false,
             department_id bigint,
             region_id bigint,
@@ -361,6 +367,15 @@ def _seed_pii_table(psql: str, database_uri: str) -> tuple[list[str], list[str]]
             first_name_tsv tsvector,
             last_name_tsv tsvector
         );
+    """
+
+    pii_values_by_case = [
+        _pii_values_for_case(case_number)
+        for case_number in range(case_count)
+    ]
+    for case_number, pii_values in enumerate(pii_values_by_case, start=1):
+        profile_id = case_number + 100
+        sql += f"""
         INSERT INTO users (
             id,
             email,
@@ -380,9 +395,9 @@ def _seed_pii_table(psql: str, database_uri: str) -> tuple[list[str], list[str]]
             last_name
         )
         VALUES (
-            1,
+            {case_number},
             {_sql_literal(pii_values["email"])},
-            {_sql_literal(safe_values["role"])},
+            'reader',
             {_sql_literal(pii_values["phone_number"])},
             {_sql_literal(pii_values["current_sign_in_ip"])},
             {_sql_literal(pii_values["last_sign_in_ip"])},
@@ -411,8 +426,8 @@ def _seed_pii_table(psql: str, database_uri: str) -> tuple[list[str], list[str]]
             age
         )
         VALUES (
-            {safe_values["profile_id"]},
-            {safe_values["profile_user_id"]},
+            {profile_id},
+            {case_number},
             {_sql_literal(pii_values["profile_birthdate"])},
             {_sql_literal(pii_values["profile_first_name"])},
             {_sql_literal(pii_values["profile_last_name"])},
@@ -425,7 +440,11 @@ def _seed_pii_table(psql: str, database_uri: str) -> tuple[list[str], list[str]]
         );
     """
     _run([psql, database_uri, "-v", "ON_ERROR_STOP=1", "-c", sql])
-    return list(pii_values.values()), list(safe_values.values())
+    return [
+        (key, value)
+        for pii_values in pii_values_by_case
+        for key, value in pii_values.items()
+    ]
 
 
 def _write_spine_config(tmp_path: Path, database_uri: str) -> Path:
@@ -473,8 +492,29 @@ def _response_text(response: dict) -> str:
     return json.dumps(response, sort_keys=True)
 
 
+def _leak_markers(key: str, value: str) -> list[str]:
+    if key.endswith("_first_name"):
+        return [f"'first_name': b'{value}'", f"'first_name': '{value}'"]
+    if key.endswith("_last_name"):
+        return [f"'last_name': b'{value}'", f"'last_name': '{value}'"]
+    return [value]
+
+
+def _assert_no_pii_leaked(text: str, pii_values: list[tuple[str, str]]) -> None:
+    leaked = [
+        f"{key}={value}"
+        for key, value in pii_values
+        if value and any(marker in text for marker in _leak_markers(key, value))
+    ]
+    assert leaked == [], f"leaked={leaked}\n{text}"
+
+
 def test_postgres_mcp_responses_do_not_leak_real_pii(tmp_path: Path, temp_postgres):
-    pii_values, safe_values = _seed_pii_table(temp_postgres["psql"], temp_postgres["uri"])
+    pii_values = _seed_pii_tables(
+        temp_postgres["psql"],
+        temp_postgres["uri"],
+        PII_E2E_CASE_COUNT,
+    )
     config_path = _write_spine_config(tmp_path, temp_postgres["uri"])
     client = SpineClient(config_path)
 
@@ -490,6 +530,7 @@ def test_postgres_mcp_responses_do_not_leak_real_pii(tmp_path: Path, temp_postgr
         tools = client.request("tools/list", {}, timeout=180)
         tool_names = {tool["name"] for tool in tools["result"]["tools"]}
         assert "execute_sql" in tool_names
+        assert "spine_recall" in tool_names
 
         users_response = client.request(
             "tools/call",
@@ -515,11 +556,54 @@ def test_postgres_mcp_responses_do_not_leak_real_pii(tmp_path: Path, temp_postgr
         )
         assert "error" not in profiles_response
 
-        text = _response_text(users_response) + _response_text(profiles_response)
-        leaked = [value for value in pii_values if value and value in text]
-        assert leaked == [], f"leaked={leaked}\n{text}"
+        lookup_email = _pii_values_for_case(0)["email"]
+        lookup_response = client.request(
+            "tools/call",
+            {
+                "name": "execute_sql",
+                "arguments": {
+                    "sql": (
+                        "SELECT users.* FROM users "
+                        f"WHERE email = {_sql_literal(lookup_email)}"
+                    ),
+                },
+            },
+            timeout=180,
+        )
+        assert "error" not in lookup_response
 
-        for value in safe_values:
-            assert value in text
+        recall_response = client.request(
+            "tools/call",
+            {
+                "name": "spine_recall",
+                "arguments": {"last_n": 5},
+            },
+            timeout=180,
+        )
+        assert "error" not in recall_response
+
+        pii_search_response = client.request(
+            "tools/call",
+            {
+                "name": "spine_recall",
+                "arguments": {"query": lookup_email, "last_n": 5},
+            },
+            timeout=180,
+        )
+        assert "error" not in pii_search_response
+        assert "No cached tool results found" in _response_text(pii_search_response)
+
+        text = (
+            _response_text(users_response)
+            + _response_text(profiles_response)
+            + _response_text(lookup_response)
+            + _response_text(recall_response)
+            + _response_text(pii_search_response)
+        )
+        _assert_no_pii_leaked(text, pii_values)
     finally:
         client.close()
+
+    audit_bytes = (tmp_path / "audit.db").read_bytes()
+    audit_text = audit_bytes.decode("utf-8", errors="ignore")
+    _assert_no_pii_leaked(audit_text, pii_values)

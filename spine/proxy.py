@@ -714,6 +714,16 @@ class SpineProxy:
         # ── Route to downstream server ──
         server = self.pool.route_tool(tool_name)
         if server is None:
+            options = self.pool.ambiguous_tool_options(tool_name)
+            if options:
+                return make_error(
+                    msg_id,
+                    TOOL_NOT_FOUND,
+                    (
+                        f"Tool '{tool_name}' is ambiguous across multiple servers. "
+                        f"Use one of: {', '.join(options)}"
+                    ),
+                )
             return make_error(
                 msg_id, TOOL_NOT_FOUND,
                 f"No server available for tool '{tool_name}'"
@@ -1150,8 +1160,6 @@ class SpineProxy:
             text = "No cached tool results found."
             if tool_name:
                 text += f" (filtered by tool: {tool_name})"
-            if query:
-                text += f" (searched for: {query})"
         else:
             lines = [f"Cached results ({len(results)} found):"]
             for r in results:

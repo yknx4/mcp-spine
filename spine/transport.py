@@ -12,6 +12,7 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import time
 from collections import Counter
@@ -383,6 +384,7 @@ class ServerPool:
             if cfg.enabled
         }
         self._tool_to_server: dict[str, str] = {}
+        self._ambiguous_tool_options: dict[str, list[str]] = {}
 
     async def start_all(self) -> None:
         """Start all configured servers concurrently."""
@@ -407,14 +409,23 @@ class ServerPool:
 
     def _rebuild_tool_index(self) -> None:
         """Assign public tool names and preserve originals for duplicate names."""
-        name_counts = Counter(
-            tool.get("_spine_original_name", tool["name"])
-            for server in self._servers.values()
-            if server.is_available
-            for tool in server._tools
-        )
+        tools_by_original: dict[str, list[ServerConnection]] = {}
+        for server in self._servers.values():
+            if not server.is_available:
+                continue
+            for tool in server._tools:
+                original_name = tool.get("_spine_original_name", tool["name"])
+                tools_by_original.setdefault(original_name, []).append(server)
+
+        name_counts = Counter({
+            original_name: len(servers)
+            for original_name, servers in tools_by_original.items()
+        })
+        server_prefixes = self._server_prefixes()
 
         self._tool_to_server.clear()
+        self._ambiguous_tool_options.clear()
+        public_names_by_original: dict[str, list[str]] = {}
         for server in self._servers.values():
             if not server.is_available:
                 continue
@@ -424,7 +435,7 @@ class ServerPool:
             for tool in server._tools:
                 original_name = tool.get("_spine_original_name", tool["name"])
                 public_name = (
-                    f"{self._tool_prefix(server.name)}_{original_name}"
+                    f"{server_prefixes[server.name]}_{original_name}"
                     if name_counts[original_name] > 1
                     else original_name
                 )
@@ -433,14 +444,40 @@ class ServerPool:
                 public_to_original[public_name] = original_name
                 public_names.add(public_name)
                 self._tool_to_server[public_name] = server.name
+                public_names_by_original.setdefault(original_name, []).append(public_name)
 
             server._tool_names = public_names
             server._public_to_original_tool = public_to_original
 
+        for original_name, servers in tools_by_original.items():
+            if name_counts[original_name] <= 1:
+                continue
+
+            self._ambiguous_tool_options[original_name] = sorted(
+                public_names_by_original.get(original_name, [])
+            )
+
     @staticmethod
     def _tool_prefix(server_name: str) -> str:
         """Normalize server names into MCP-friendly duplicate tool prefixes."""
-        return re.sub(r"[^A-Za-z0-9_]+", "_", server_name).strip("_")
+        return re.sub(r"[^A-Za-z0-9_]+", "_", server_name).strip("_") or "server"
+
+    def _server_prefixes(self) -> dict[str, str]:
+        """Return MCP-friendly server prefixes without normalized-name collisions."""
+        prefixes = {
+            name: self._tool_prefix(name)
+            for name, server in self._servers.items()
+            if server.is_available
+        }
+        prefix_counts = Counter(prefixes.values())
+        return {
+            name: (
+                prefix
+                if prefix_counts[prefix] == 1
+                else f"{prefix}_{hashlib.sha256(name.encode('utf-8')).hexdigest()[:8]}"
+            )
+            for name, prefix in prefixes.items()
+        }
 
     def all_tools(self) -> list[dict[str, Any]]:
         """Return all tools from all available servers."""
@@ -459,9 +496,14 @@ class ServerPool:
                 return server
         return None
 
+    def ambiguous_tool_options(self, tool_name: str) -> list[str]:
+        """Return public tool names for an unprefixed duplicate tool, if ambiguous."""
+        return self._ambiguous_tool_options.get(tool_name, [])
+
     async def refresh_tools(self) -> list[dict[str, Any]]:
         """Re-fetch tools from all servers (e.g. after schema changes)."""
         self._tool_to_server.clear()
+        self._ambiguous_tool_options.clear()
         for server in self._servers.values():
             if server.is_available:
                 try:

@@ -191,7 +191,8 @@ class TestPIIScrambling:
             "'library_card_number': b'LC-12345', 'cultural_pass_number': b'CP-98765', "
             "'birthdate': '2012-03-04', 'current_sign_in_ip': '198.51.100.10', "
             "'login': b'jane-reader', 'username': b'jreader', "
-            "'school_student_id': 12345, 'age': 10, 'safe_code': 'BOOK-ALPHA'}]"
+            "'school_student_id': 12345, 'age': 10, 'safe_code': 'BOOK-ALPHA', "
+            "'future_random_profile_field': 'sensitive free text'}]"
         )
 
         scrambled = pii_module._scramble_structured_text(text)
@@ -208,18 +209,20 @@ class TestPIIScrambling:
             "jane-reader",
             "jreader",
             "12345",
+            "BOOK-ALPHA",
+            "sensitive free text",
         ):
             assert value not in scrambled
 
         assert "'age': [AGE]" in scrambled
-        assert "BOOK-ALPHA" in scrambled
 
     @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
-    def test_serialized_database_column_rows_scramble_names(self, monkeypatch):
+    def test_serialized_database_column_rows_scramble_unknown_columns(self, monkeypatch):
         monkeypatch.setattr(pii_module, "_fake_value", lambda entity, value: f"[{entity}]")
         text = (
             "[{'column_name': 'first_name', 'value': 'Jane'}, "
             "{'column_name': 'last_name', 'value': 'Reader'}, "
+            "{'column_name': 'future_random_profile_field', 'value': 'sensitive free text'}, "
             "{'column_name': 'name', 'value': 'users'}]"
         )
 
@@ -227,6 +230,7 @@ class TestPIIScrambling:
 
         assert "Jane" not in scrambled
         assert "Reader" not in scrambled
+        assert "sensitive free text" not in scrambled
         assert "{'column_name': 'name', 'value': 'users'}" in scrambled
 
     @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
