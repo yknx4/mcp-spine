@@ -12,6 +12,7 @@ Covers:
 """
 
 
+import ast
 import builtins
 import importlib.util
 
@@ -277,6 +278,29 @@ class TestPIIScrambling:
         assert "[PHONE_NUMBER]" not in scrambled
         assert "[IP_ADDRESS]" not in scrambled
         assert "[URL]" not in scrambled
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_stringified_row_output_stays_parseable_after_scrambling(self, monkeypatch):
+        monkeypatch.setattr(pii_module, "_fake_value", lambda entity, value: f"[{entity}]")
+        text = (
+            "[{'id': 1, 'email': 'reader@example.com', 'tokens': {'auth': 'secret-token'}, "
+            "'preferences': {'notify': True}, 'phone_number': '415-867-5309'}, "
+            "{'id': 2, 'email': 'other@example.com', 'tokens': {}, "
+            "'preferences': {'theme': 'dark'}, 'phone_number': None}]"
+        )
+
+        scrambled = scramble_pii_value(text, use_nlp=False)
+        parsed = ast.literal_eval(scrambled)
+
+        assert parsed[0]["id"] == 1
+        assert parsed[0]["email"] == "[EMAIL_ADDRESS]"
+        assert parsed[0]["tokens"] == {"auth": "[ID]"}
+        assert parsed[0]["preferences"] == {"notify": True}
+        assert parsed[0]["phone_number"] == "[PHONE_NUMBER]"
+        assert parsed[1]["id"] == 2
+        assert parsed[1]["tokens"] == {}
+        assert parsed[1]["preferences"] == {"theme": "dark"}
+        assert parsed[1]["phone_number"] is None
 
     @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
     def test_structured_database_rows_scramble_bare_values(self, monkeypatch):

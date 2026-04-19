@@ -13,8 +13,10 @@ runtime environment. Servers can opt out with scramble_pii_use_nlp = false.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
+import pprint
 import re
 import tempfile
 from typing import Any, Iterable, NamedTuple
@@ -686,6 +688,10 @@ def scramble_pii_value(
 ) -> Any:
     """Deep-scramble PII in string values while preserving container shape."""
     if isinstance(value, str):
+        parsed = _parse_serialized_container(value)
+        if parsed is not None:
+            scrambled = scramble_pii_value(parsed, context_key=context_key, use_nlp=use_nlp)
+            return pprint.pformat(scrambled, sort_dicts=False)
         return _get_scrambler(use_nlp=use_nlp).scramble_text(
             value,
             context_key=context_key,
@@ -698,12 +704,34 @@ def scramble_pii_value(
     ):
         return _fake_value(_entity_for_context_key(context_key) or "ID", str(value))
     if isinstance(value, dict):
+        parent_entity = _entity_for_context_key(context_key) if context_key else None
         return {
-            key: scramble_pii_value(item, context_key=str(key), use_nlp=use_nlp)
+            key: scramble_pii_value(
+                item,
+                context_key=context_key if parent_entity else str(key),
+                use_nlp=use_nlp,
+            )
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [scramble_pii_value(item, use_nlp=use_nlp) for item in value]
+        return [
+            scramble_pii_value(item, context_key=context_key, use_nlp=use_nlp)
+            for item in value
+        ]
     if isinstance(value, tuple):
-        return tuple(scramble_pii_value(item, use_nlp=use_nlp) for item in value)
+        return tuple(
+            scramble_pii_value(item, context_key=context_key, use_nlp=use_nlp)
+            for item in value
+        )
     return value
+
+
+def _parse_serialized_container(value: str) -> Any | None:
+    """Parse Python-literal row output so PII replacement preserves structure."""
+    stripped = value.strip()
+    if not stripped or stripped[0] not in "[{(":
+        return None
+    try:
+        return ast.literal_eval(stripped)
+    except (SyntaxError, ValueError, TypeError, MemoryError):
+        return None
