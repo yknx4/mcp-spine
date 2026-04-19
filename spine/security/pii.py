@@ -455,11 +455,20 @@ def _entity_for_structured_value(label: str, value: str) -> str | None:
     ):
         return None
 
-    if re.fullmatch(r"-?\d+(?:\.\d+)?", stripped):
-        return "ID"
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ T][^,\]}]+)?", stripped):
-        return "DATE_TIME"
-    return "ID"
+    if re.search(r"\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b", stripped):
+        return "EMAIL_ADDRESS"
+    if re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", stripped) or (
+        ":" in stripped and re.fullmatch(r"[0-9A-Fa-f:.]+", stripped)
+    ):
+        return "IP_ADDRESS"
+    if re.fullmatch(
+        r"\+?(?:\d[\s().-]*){7,}\d(?:\s*(?:x|ext\.?)\s*\d+)?",
+        stripped,
+        flags=re.IGNORECASE,
+    ):
+        return "PHONE_NUMBER"
+
+    return None
 
 
 def _context_entity_types() -> set[str]:

@@ -209,12 +209,12 @@ class TestPIIScrambling:
             "jane-reader",
             "jreader",
             "12345",
-            "BOOK-ALPHA",
-            "sensitive free text",
         ):
             assert value not in scrambled
 
         assert "'age': [AGE]" in scrambled
+        assert "BOOK-ALPHA" in scrambled
+        assert "sensitive free text" in scrambled
 
     @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
     def test_serialized_database_column_rows_scramble_unknown_columns(self, monkeypatch):
@@ -223,6 +223,7 @@ class TestPIIScrambling:
             "[{'column_name': 'first_name', 'value': 'Jane'}, "
             "{'column_name': 'last_name', 'value': 'Reader'}, "
             "{'column_name': 'future_random_profile_field', 'value': 'sensitive free text'}, "
+            "{'column_name': 'future_random_contact', 'value': 'reader@example.com'}, "
             "{'column_name': 'name', 'value': 'users'}]"
         )
 
@@ -230,8 +231,28 @@ class TestPIIScrambling:
 
         assert "Jane" not in scrambled
         assert "Reader" not in scrambled
-        assert "sensitive free text" not in scrambled
+        assert "reader@example.com" not in scrambled
+        assert "sensitive free text" in scrambled
         assert "{'column_name': 'name', 'value': 'users'}" in scrambled
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_structured_database_rows_preserve_non_pii_ids_and_metrics(self, monkeypatch):
+        monkeypatch.setattr(pii_module, "_fake_value", lambda entity, value: f"[{entity}]")
+        text = (
+            "[{'id': 123, 'profile_id': 456, 'calls': 789, "
+            "'total_exec_ms': 1234.56, 'mean_exec_ms': 7.89, 'rows': 42, "
+            "'query': 'SELECT * FROM profiles WHERE profile_id = $1'}]"
+        )
+
+        scrambled = pii_module._scramble_structured_text(text)
+
+        assert "'id': 123" in scrambled
+        assert "'profile_id': 456" in scrambled
+        assert "'calls': 789" in scrambled
+        assert "'total_exec_ms': 1234.56" in scrambled
+        assert "'mean_exec_ms': 7.89" in scrambled
+        assert "'rows': 42" in scrambled
+        assert "SELECT * FROM profiles WHERE profile_id = $1" in scrambled
 
     @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
     def test_structured_database_rows_scramble_bare_values(self, monkeypatch):
