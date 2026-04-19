@@ -137,6 +137,22 @@ class TestPIIScrambling:
         assert scrambled["postal_code"] != "90210"
         assert scrambled["id"] == "12345"
 
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_serialized_database_rows_use_column_name_context(self):
+        text = "[{'column_name': 'last_name', 'value': 'Smith'}]"
+        scrambled = scramble_pii(text, use_nlp=False)
+        assert "Smith" not in scrambled
+        assert "column_name" in scrambled
+        assert "last_name" in scrambled
+
+    @pytest.mark.skipif(not has_pii_deps, reason="PII optional dependencies not installed")
+    def test_serialized_database_rows_scramble_direct_keyed_values(self):
+        text = "[{'email': 'jane@example.com', 'zipcode': '90210'}]"
+        scrambled = scramble_pii(text, use_nlp=False)
+        assert "jane@example.com" not in scrambled
+        assert "90210" not in scrambled
+        assert "zipcode" in scrambled
+
 
 # ───────────────────────────────────────────────
 # Path Traversal Prevention

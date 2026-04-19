@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tempfile
 from typing import Any, Iterable
 
@@ -266,6 +267,84 @@ def _build_anonymizer_operators(entity_types: Iterable[str]) -> dict[str, Any]:
     return operators
 
 
+def _entity_for_context_key(key: str) -> str | None:
+    normalized = key.lower()
+    if "email" in normalized:
+        return "EMAIL_ADDRESS"
+    if "phone" in normalized or "mobile" in normalized or "fax" in normalized:
+        return "PHONE_NUMBER"
+    if "ssn" in normalized or "social_security" in normalized:
+        return "US_SSN"
+    if "zip" in normalized or "postal" in normalized or "postcode" in normalized:
+        return "POSTAL_CODE"
+    if "address" in normalized or normalized in {"city", "state", "province", "country"}:
+        return "LOCATION"
+    if "birth" in normalized or normalized in {"dob", "date_of_birth"}:
+        return "DATE_TIME"
+    if "name" in normalized:
+        return "PERSON"
+    if "username" in normalized or "login" in normalized:
+        return "PERSON"
+    return None
+
+
+def _replace_keyed_value(label: str, value: str) -> str:
+    entity_type = _entity_for_context_key(label)
+    if not entity_type or not value.strip():
+        return value
+    return _fake_value(entity_type, value)
+
+
+def _scramble_structured_text(text: str) -> str:
+    """
+    Scramble values in common serialized row formats before NLP runs.
+
+    Database MCP servers often return rows as text like:
+      {'column_name': 'last_name', 'value': 'Smith'}
+      {'email': 'jane@example.com', 'zipcode': '90210'}
+
+    Presidio sees that as one free-form sentence and can miss short names,
+    usernames, ZIP codes, or search-vector fields. This pass keeps the output
+    shape intact but uses nearby field names as context for replacement.
+    """
+    key_pattern = (
+        r"(email|phone|mobile|fax|ssn|social_security|zip|zipcode|postal_code|"
+        r"postcode|address|city|state|province|country|birth|dob|date_of_birth|"
+        r"first_name|last_name|full_name|name|username|login|"
+        r"first_name_tsv|last_name_tsv)"
+    )
+
+    column_value_pattern = re.compile(
+        rf"(?P<prefix>['\"]column_name['\"]\s*:\s*['\"](?P<label>{key_pattern})['\"]"
+        rf"\s*,\s*['\"]value['\"]\s*:\s*['\"])(?P<value>.*?)(?P<suffix>['\"])",
+        flags=re.IGNORECASE,
+    )
+
+    def replace_column_value(match: re.Match) -> str:
+        return (
+            match.group("prefix")
+            + _replace_keyed_value(match.group("label"), match.group("value"))
+            + match.group("suffix")
+        )
+
+    text = column_value_pattern.sub(replace_column_value, text)
+
+    direct_key_pattern = re.compile(
+        rf"(?P<prefix>['\"](?P<label>{key_pattern})['\"]\s*:\s*['\"])"
+        rf"(?P<value>.*?)(?P<suffix>['\"])",
+        flags=re.IGNORECASE,
+    )
+
+    def replace_direct_key(match: re.Match) -> str:
+        return (
+            match.group("prefix")
+            + _replace_keyed_value(match.group("label"), match.group("value"))
+            + match.group("suffix")
+        )
+
+    return direct_key_pattern.sub(replace_direct_key, text)
+
+
 class _PresidioPiiScrambler:
     def __init__(self, use_nlp: bool) -> None:
         self._analyzer = _build_presidio_analyzer(use_nlp=use_nlp)
@@ -289,6 +368,7 @@ class _PresidioPiiScrambler:
                 return scrambled[len(prefix):]
             return scrambled
 
+        text = _scramble_structured_text(text)
         results = self.analyze(text)
         if not results:
             return text
