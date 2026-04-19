@@ -1160,8 +1160,6 @@ class SpineProxy:
             text = "No cached tool results found."
             if tool_name:
                 text += f" (filtered by tool: {tool_name})"
-            if query:
-                text += f" (searched for: {query})"
         else:
             lines = [f"Cached results ({len(results)} found):"]
             for r in results:

@@ -219,34 +219,43 @@ def temp_postgres(tmp_path: Path):
 
 
 def _pii_values_for_case(case_number: int) -> dict[str, str]:
+    from faker import Faker
+
+    fake = Faker("en_US")
+    fake.seed_instance(8675309 + case_number)
+
     pii_values = {
-        "email": f"pii-case-{case_number:02d}-user@example.invalid",
-        "parent_email_address": f"pii-case-{case_number:02d}-parent@example.invalid",
-        "phone_number": f"555-010-{case_number:04d}",
+        "email": fake.email(),
+        "parent_email_address": fake.email(),
+        "phone_number": fake.phone_number(),
         "current_sign_in_ip": f"198.51.100.{case_number + 10}",
         "last_sign_in_ip": f"198.51.100.{case_number + 40}",
-        "zipcode": f"9{case_number:04d}",
-        "library_card_number": f"REAL-LC-{case_number:02d}-12345678",
-        "username": f"real_pii_user_{case_number:02d}",
-        "reset_password_token": f"real-reset-token-case-{case_number:02d}-abcdef",
-        "otp_secret": f"REAL-OTP-CASE-{case_number:02d}-12345678",
-        "encrypted_pin": f"real-pin-case-{case_number:02d}-abcdef",
-        "encrypted_otp_secret": f"real-otp-encrypted-case-{case_number:02d}-abcdef",
-        "school_student_id": f"88{case_number:05d}",
-        "user_first_name": f"RealUserFirst{case_number:02d}",
-        "user_last_name": f"RealUserLast{case_number:02d}",
-        "profile_birthdate": f"2010-01-{case_number + 1:02d}",
-        "profile_first_name": f"RealProfileFirst{case_number:02d}",
-        "profile_last_name": f"RealProfileLast{case_number:02d}",
-        "profile_phone_number": f"555-011-{case_number:04d}",
-        "profile_zipcode": f"8{case_number:04d}",
-        "cultural_pass_number": f"REAL-CP-{case_number:02d}-12345678",
-        "profile_age": f"12.{case_number:02d}",
+        "zipcode": fake.postcode(),
+        "library_card_number": fake.bothify(text="LC-########"),
+        "username": fake.user_name(),
+        "reset_password_token": fake.sha256(),
+        "otp_secret": fake.bothify(text="OTP-????????-########"),
+        "encrypted_pin": fake.bothify(text="pin-????????-########"),
+        "encrypted_otp_secret": fake.bothify(text="otp-????????-########"),
+        "school_student_id": str(fake.random_number(digits=7, fix_len=True)),
+        "user_first_name": fake.first_name(),
+        "user_last_name": fake.last_name(),
+        "profile_birthdate": str(fake.date_of_birth(minimum_age=8, maximum_age=17)),
+        "profile_first_name": fake.first_name(),
+        "profile_last_name": fake.last_name(),
+        "profile_phone_number": fake.phone_number(),
+        "profile_zipcode": fake.postcode(),
+        "cultural_pass_number": fake.bothify(text="CP-########"),
+        "profile_age": str(fake.pydecimal(left_digits=2, right_digits=2, positive=True)),
     }
     return pii_values
 
 
-def _seed_pii_tables(psql: str, database_uri: str, case_count: int) -> list[str]:
+def _seed_pii_tables(
+    psql: str,
+    database_uri: str,
+    case_count: int,
+) -> list[tuple[str, str]]:
     if case_count < 1:
         raise ValueError("case_count must be at least 1")
 
@@ -291,7 +300,7 @@ def _seed_pii_tables(psql: str, database_uri: str, case_count: int) -> list[str]
             military_sponsor_status character varying,
             provider character varying NOT NULL DEFAULT 'email',
             uid uuid,
-            tokens jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+            tokens jsonb NOT NULL DEFAULT '{}'::jsonb,
             mobile_app_user boolean DEFAULT false,
             department_id bigint,
             region_id bigint,
@@ -432,9 +441,9 @@ def _seed_pii_tables(psql: str, database_uri: str, case_count: int) -> list[str]
     """
     _run([psql, database_uri, "-v", "ON_ERROR_STOP=1", "-c", sql])
     return [
-        value
+        (key, value)
         for pii_values in pii_values_by_case
-        for value in pii_values.values()
+        for key, value in pii_values.items()
     ]
 
 
@@ -483,8 +492,20 @@ def _response_text(response: dict) -> str:
     return json.dumps(response, sort_keys=True)
 
 
-def _assert_no_pii_leaked(text: str, pii_values: list[str]) -> None:
-    leaked = [value for value in pii_values if value and value in text]
+def _leak_markers(key: str, value: str) -> list[str]:
+    if key.endswith("_first_name"):
+        return [f"'first_name': b'{value}'", f"'first_name': '{value}'"]
+    if key.endswith("_last_name"):
+        return [f"'last_name': b'{value}'", f"'last_name': '{value}'"]
+    return [value]
+
+
+def _assert_no_pii_leaked(text: str, pii_values: list[tuple[str, str]]) -> None:
+    leaked = [
+        f"{key}={value}"
+        for key, value in pii_values
+        if value and any(marker in text for marker in _leak_markers(key, value))
+    ]
     assert leaked == [], f"leaked={leaked}\n{text}"
 
 

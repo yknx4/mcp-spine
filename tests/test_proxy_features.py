@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from spine.config import ServerConfig
+from spine.config import ServerConfig, SpineConfig, StateGuardConfig
+from spine.proxy import SpineProxy
 from spine.security.policy import PolicyAction, SecurityPolicy, ToolPolicy
 from spine.transport import ServerConnection, ServerPool
 
@@ -162,6 +163,27 @@ class TestProtocolMessages:
         from spine.protocol import make_response
         resp = make_response("abc-123", {"tools": []})
         assert resp["id"] == "abc-123"
+
+
+class TestRecallMetaTool:
+    """Test spine_recall response safety."""
+
+    def test_recall_miss_does_not_echo_raw_query(self, tmp_path):
+        proxy = SpineProxy(
+            SpineConfig(
+                audit_db=str(tmp_path / "audit.db"),
+                state_guard=StateGuardConfig(enabled=False),
+            )
+        )
+
+        response = proxy._handle_recall(
+            1,
+            {"query": "pii-case-00-user@example.invalid", "last_n": 5},
+        )
+
+        text = response["result"]["content"][0]["text"]
+        assert "No cached tool results found." in text
+        assert "pii-case-00-user@example.invalid" not in text
 
 
 class TestDuplicateToolNames:
