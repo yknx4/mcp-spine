@@ -90,12 +90,16 @@ class ServerConnection:
         self._pending: dict[int, asyncio.Future] = {}
         self._reader_task: asyncio.Task | None = None
         self._sse_client = None  # SSEClient instance for SSE transport
+        self._http_client = None  # StreamableHTTPClient instance
         self._is_sse = config.transport == "sse"
+        self._is_streamable_http = config.transport == "streamable-http"
 
     @property
     def is_available(self) -> bool:
         if self._is_sse:
             return self._sse_client is not None and self._sse_client.is_connected
+        if self._is_streamable_http:
+            return self._http_client is not None and self._http_client.is_connected
         return (
             self._process is not None
             and self._process.returncode is None
@@ -103,11 +107,41 @@ class ServerConnection:
         )
 
     async def start(self) -> None:
-        """Start the server connection (stdio subprocess or SSE client)."""
+        """Start the server connection (stdio subprocess, SSE, or Streamable HTTP)."""
         if self._is_sse:
             await self._start_sse()
+        elif self._is_streamable_http:
+            await self._start_streamable_http()
         else:
             await self._start_stdio()
+
+    async def _start_streamable_http(self) -> None:
+        """Connect to a remote Streamable HTTP MCP server."""
+        self._logger.info(
+            EventType.SERVER_CONNECT,
+            server_name=self.name,
+            transport="streamable-http",
+            url=self.config.url,
+        )
+
+        from spine.streamable_http import StreamableHTTPClient
+
+        self._http_client = StreamableHTTPClient(
+            url=self.config.url,
+            headers=self.config.headers,
+            timeout=self.config.timeout_seconds,
+            logger=self._logger,
+        )
+
+        try:
+            await self._http_client.connect()
+        except Exception as e:
+            self._logger.error(
+                EventType.SERVER_CONNECT,
+                server_name=self.name,
+                error=f"Streamable HTTP connection failed: {e}",
+            )
+            raise
 
     async def _start_sse(self) -> None:
         """Connect to a remote SSE MCP server."""
@@ -242,6 +276,16 @@ class ServerConnection:
                 self._circuit.record_failure()
                 raise
 
+        # Route through Streamable HTTP client
+        if self._is_streamable_http:
+            try:
+                result = await self._http_client.send_request(method, params)
+                self._circuit.record_success()
+                return result
+            except Exception:
+                self._circuit.record_failure()
+                raise
+
         self._request_id += 1
         req_id = self._request_id
 
@@ -285,12 +329,16 @@ class ServerConnection:
 
     async def initialize(self) -> dict[str, Any]:
         """Send MCP initialize handshake."""
+        # Streamable HTTP handles initialize internally during connect
+        if self._is_streamable_http:
+            return {}
+
         result = await self.send_request("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {
                 "name": "mcp-spine",
-                "version": "0.1.0",
+                "version": "0.2.3",
             },
         })
 
@@ -347,6 +395,11 @@ class ServerConnection:
         if self._is_sse:
             if self._sse_client:
                 await self._sse_client.close()
+            return
+
+        if self._is_streamable_http:
+            if self._http_client:
+                await self._http_client.close()
             return
 
         if self._reader_task:

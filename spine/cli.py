@@ -545,9 +545,19 @@ def verify(config: str):
 @click.option("--db", default="spine_audit.db", help="Audit database path")
 @click.option("--event", "-e", default=None, help="Filter by event type")
 @click.option("--tool", "-t", default=None, help="Filter by tool name")
+@click.option("--session", "-s", default=None, help="Filter by session ID")
 @click.option("--last", "-n", default=20, help="Number of recent entries")
 @click.option("--security-only", is_flag=True, help="Show only security events")
-def audit(db: str, event: str | None, tool: str | None, last: int, security_only: bool):
+@click.option("--sessions", is_flag=True, help="List all sessions")
+def audit(
+    db: str,
+    event: str | None,
+    tool: str | None,
+    session: str | None,
+    last: int,
+    security_only: bool,
+    sessions: bool,
+):
     """Query the audit log."""
     import sqlite3
 
@@ -557,7 +567,50 @@ def audit(db: str, event: str | None, tool: str | None, last: int, security_only
         sys.exit(1)
 
     conn = sqlite3.connect(db)
-    query = "SELECT timestamp, event_type, tool_name, server_name, details, fingerprint FROM audit_log"
+
+    # List sessions mode
+    if sessions:
+        rows = conn.execute("""
+            SELECT session_id,
+                   MIN(created_at) as first_seen,
+                   MAX(created_at) as last_seen,
+                   COUNT(*) as entries,
+                   MAX(CASE WHEN event_type = 'startup' AND details LIKE '%client_name%'
+                       THEN json_extract(details, '$.client_name') END) as client
+            FROM audit_log
+            WHERE session_id IS NOT NULL
+            GROUP BY session_id
+            ORDER BY first_seen DESC
+            LIMIT 20
+        """).fetchall()
+        conn.close()
+
+        if not rows:
+            console.print("[dim]No sessions found.[/dim]")
+            return
+
+        table = Table(title="Client Sessions")
+        table.add_column("Session ID", style="cyan", width=26)
+        table.add_column("Client", style="green")
+        table.add_column("First Seen", style="dim")
+        table.add_column("Last Seen", style="dim")
+        table.add_column("Entries", justify="right")
+
+        for sid, first, last_seen, count, client in rows:
+            table.add_row(
+                sid or "",
+                client or "",
+                first or "",
+                last_seen or "",
+                str(count),
+            )
+        console.print(table)
+        return
+
+    query = (
+        "SELECT timestamp, event_type, tool_name, server_name, details, fingerprint, session_id "
+        "FROM audit_log"
+    )
     conditions = []
     params = []
 
@@ -567,6 +620,9 @@ def audit(db: str, event: str | None, tool: str | None, last: int, security_only
     if tool:
         conditions.append("tool_name = ?")
         params.append(tool)
+    if session:
+        conditions.append("session_id = ?")
+        params.append(session)
     if security_only:
         conditions.append(
             "event_type IN ('rate_limited', 'path_violation', "
@@ -589,11 +645,12 @@ def audit(db: str, event: str | None, tool: str | None, last: int, security_only
     table.add_column("Event", style="cyan")
     table.add_column("Tool", style="green")
     table.add_column("Server", style="blue")
+    table.add_column("Session", style="dim", width=8)
     table.add_column("Fingerprint", style="dim", width=12)
 
     import datetime
 
-    for ts, evt, tname, sname, details, fp in reversed(rows):
+    for ts, evt, tname, sname, details, fp, sid in reversed(rows):
         time_str = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S")
         style = "red bold" if evt in (
             "rate_limited", "path_violation", "secret_detected",
@@ -604,6 +661,7 @@ def audit(db: str, event: str | None, tool: str | None, last: int, security_only
             f"[{style}]{evt}[/{style}]" if style else evt,
             tname or "",
             sname or "",
+            (sid or "")[:8],
             fp or "",
         )
 
