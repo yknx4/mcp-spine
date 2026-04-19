@@ -42,11 +42,15 @@ class ServerConfig:
 
     def validate(self, allowed_commands: frozenset[str]) -> list[str]:
         warnings = []
-        if self.transport == "sse":
+        if self.transport == "sse" or self.transport == "streamable-http":
             if not self.url:
-                raise ValueError(f"Server '{self.name}': SSE transport requires 'url'")
+                raise ValueError(
+                    f"Server '{self.name}': {self.transport} transport requires 'url'"
+                )
             if not self.url.startswith(("http://", "https://")):
-                raise ValueError(f"Server '{self.name}': SSE url must start with http:// or https://")
+                raise ValueError(
+                    f"Server '{self.name}': url must start with http:// or https://"
+                )
         else:
             if not self.command:
                 raise ValueError(f"Server '{self.name}': stdio transport requires 'command'")
